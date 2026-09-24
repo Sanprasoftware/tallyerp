@@ -2,6 +2,8 @@ import re
 import frappe
 
 from parshwa.parshwa.tally_client import send_to_tally
+from parshwa.parshwa.tally.supplier import create_tally_supplier_ledger
+from parshwa.parshwa.tally.customer import create_tally_customer_ledger
 
 
 # ============================================================
@@ -65,7 +67,36 @@ def create_tally_journal_entry(journal_entry_name):
 
     for row in doc.accounts:
 
-        account_name = row.account.split(" - ")[0].strip()
+        account_name = row.account.strip()
+
+        # Use the actual Tally party ledger for Supplier/Customer rows.
+        if row.party_type == "Supplier" and row.party:
+            supplier_result = create_tally_supplier_ledger(row.party)
+
+            if not supplier_result.get("success"):
+                return {
+                    "success": False,
+                    "response": supplier_result.get(
+                        "message",
+                        f"Failed to sync Supplier {row.party}"
+                    )
+                }
+
+            account_name = supplier_result.get("ledger_name") or account_name
+
+        elif row.party_type == "Customer" and row.party:
+            customer_result = create_tally_customer_ledger(row.party)
+
+            if not customer_result.get("success"):
+                return {
+                    "success": False,
+                    "response": customer_result.get(
+                        "message",
+                        f"Failed to sync Customer {row.party}"
+                    )
+                }
+
+            account_name = customer_result.get("ledger_name") or account_name
 
         debit = float(row.debit or 0)
         credit = float(row.credit or 0)
@@ -105,6 +136,10 @@ def create_tally_journal_entry(journal_entry_name):
 <BODY>
 
 <DESC>
+    <STATICVARIABLES>
+        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVERRORS>Yes</SVERRORS>
+    </STATICVARIABLES>
 </DESC>
 
 <DATA>
@@ -113,11 +148,14 @@ def create_tally_journal_entry(journal_entry_name):
 
 <VOUCHER
     VCHTYPE="Journal"
-    ACTION="Create">
+    ACTION="Create"
+    OBJVIEW="Accounting Voucher View">
 
     <DATE>{voucher_date}</DATE>
 
     <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+    
+    <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
 
     <VOUCHERNUMBER>{journal_entry_name}</VOUCHERNUMBER>
 

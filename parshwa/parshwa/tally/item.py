@@ -6,6 +6,9 @@ from parshwa.parshwa.tally_client import (
     send_to_tally
 )
 
+from parshwa.parshwa.tally.item_group import create_tally_stock_group
+from parshwa.parshwa.tally.uom import create_tally_uom
+
 
 def create_tally_stock_item(item_name):
 
@@ -29,6 +32,47 @@ def create_tally_stock_item(item_name):
 
     item_group = item.item_group or "Primary"
     uom = item.stock_uom or "Nos"
+
+    # ---------------------------------------------------------
+    # Ensure Tally Stock Group Exists
+    # ---------------------------------------------------------
+
+    if item_group != "All Item Groups":
+        group_result = create_tally_stock_group(item_group)
+
+        if not group_result.get("success"):
+            return {
+                "success": False,
+                "item_name": item_name,
+                "message": (
+                    f"Unable to create/ensure Tally Stock Group "
+                    f"'{item_group}'."
+                ),
+                "response": group_result.get(
+                    "response",
+                    group_result.get("message", "Unknown error")
+                )
+            }
+
+    # ---------------------------------------------------------
+    # Ensure Tally UOM Exists
+    # ---------------------------------------------------------
+
+    uom_result = create_tally_uom(uom)
+
+    if not uom_result.get("success"):
+        return {
+            "success": False,
+            "item_name": item_name,
+            "message": (
+                f"Unable to create/ensure Tally Unit "
+                f"'{uom}'."
+            ),
+            "response": uom_result.get(
+                "response",
+                uom_result.get("message", "Unknown error")
+            )
+        }
 
     # ---------------------------------------------------------
     # Get Existing Tally Settings

@@ -1,8 +1,11 @@
 import re
 import frappe
+import calendar
 
 from parshwa.parshwa.tally_client import send_to_tally
-
+from parshwa.parshwa.tally.supplier import create_tally_supplier_ledger
+from parshwa.parshwa.tally.item import create_tally_stock_item
+from parshwa.parshwa.tally.tax_ledger import create_tally_tax_ledger
 
 # ============================================================
 # GET TALLY COMPANY
@@ -33,31 +36,185 @@ def create_tally_purchase_invoice(invoice_name):
     # Prevent duplicate Tally voucher
     # --------------------------------------------------------
 
-    if invoice.custom_tally_voucher_id and str(invoice.custom_tally_voucher_id) != "0":
+    tally_voucher_id = invoice.get("custom_tally_voucher_id")
+
+    if tally_voucher_id and str(tally_voucher_id) != "0":
         return {
             "success": False,
             "response": (
                 f"Purchase Invoice {invoice_name} "
                 f"is already synced to Tally. "
-                f"Tally Voucher ID: {invoice.custom_tally_voucher_id}"
+                f"Tally Voucher ID: {tally_voucher_id}"
             ),
-            "tally_voucher_id": invoice.custom_tally_voucher_id,
+            "tally_voucher_id": tally_voucher_id,
         }
 
-    tally_company = get_tally_company()
-    supplier = invoice.supplier
+    # Ensure supplier ledger exists in Tally
+    supplier_result = create_tally_supplier_ledger(invoice.supplier)
 
-    tally_company = get_tally_company()
+    if not supplier_result.get("success"):
+        return {
+            "success": False,
+            "response": (
+                f"Unable to create/ensure Tally supplier ledger "
+                f"for {invoice.supplier}.\n\n"
+                f"{supplier_result.get('response', supplier_result.get('message', 'Unknown error'))}"
+            ),
+        }
+    
+    supplier = supplier_result.get("ledger_name")
 
-    supplier = invoice.supplier
+    if not supplier:
+        return {
+            "success": False,
+            "response": (
+                f"Tally supplier ledger name was not returned for "
+                f"{invoice.supplier}."
+            ),
+        }
+    # Ensure all Purchase Invoice Items exist in Tally
+    for invoice_item in invoice.items:
+        if not invoice_item.item_code:
+            continue
 
-    # Remove ERPNext company suffix
-    if " - " in supplier:
-        supplier = supplier.split(" - ")[0]
+        item_result = create_tally_stock_item(invoice_item.item_code)
+
+        if not item_result.get("success"):
+            return {
+                "success": False,
+                "response": (
+                    f"Unable to create/ensure Tally Item "
+                    f"for {invoice_item.item_code}.\n\n"
+                    f"{item_result.get('response', item_result.get('message', 'Unknown error'))}"
+                ),
+            }
+
+  # Ensure Purchase Invoice tax ledgers exist in Tally
+    tax_ledgers = []
+
+    for tax in invoice.taxes:
+        if not tax.account_head or not tax.tax_amount:
+            continue
+
+        tax_result = create_tally_tax_ledger(tax.account_head)
+
+        if not tax_result.get("success"):
+            return {
+                "success": False,
+                "response": (
+                    f"Unable to create/ensure Tally Tax Ledger "
+                    f"for {tax.account_head}.\n\n"
+                    f"{tax_result.get('response', tax_result.get('message', 'Unknown error'))}"
+                ),
+            }
+
+        tax_ledgers.append({
+            "ledger_name": tax_result.get("ledger_name"),
+            "amount": float(tax.tax_amount or 0),
+        })
+
+    settings = frappe.get_doc(
+        "Tally Settings",
+        frappe.db.get_value(
+            "Tally Settings",
+            {"enabled": 1},
+            "name"
+        )
+    )
+
+    tally_company = settings.tally_company
+
+    if not tally_company:
+        return {
+            "success": False,
+            "response": "Tally Company is not configured."
+        }
 
     total_amount = invoice.grand_total
 
-    posting_date = invoice.posting_date.strftime("%Y%m%d")
+    posting_date = invoice.posting_date.strftime("%d-%b-%Y")
+
+    inventory_entries = ""
+
+    for invoice_item in invoice.items:
+
+        if not invoice_item.item_code:
+            continue
+
+        item = frappe.get_doc("Item", invoice_item.item_code)
+
+        stock_item_name = item.item_name
+        uom = invoice_item.uom or invoice_item.stock_uom or item.stock_uom or "Nos"
+        qty = float(invoice_item.qty or 0)
+        rate = float(invoice_item.rate or 0)
+        amount = float(invoice_item.amount or 0)
+
+        inventory_entries += f"""
+    <ALLINVENTORYENTRIES.LIST>
+
+        <STOCKITEMNAME>{stock_item_name}</STOCKITEMNAME>
+
+        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+
+        <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+
+        <ACTUALQTY>{qty:g} {uom}</ACTUALQTY>
+
+        <BILLEDQTY>{qty:g} {uom}</BILLEDQTY>
+
+        <RATE>{rate:g}/{uom}</RATE>
+
+        <AMOUNT>{amount:.2f}</AMOUNT>
+
+        <ACCOUNTINGALLOCATIONS.LIST>
+
+            <LEDGERNAME>Purchase</LEDGERNAME>
+
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+
+            <AMOUNT>{amount:.2f}</AMOUNT>
+
+        </ACCOUNTINGALLOCATIONS.LIST>
+
+    </ALLINVENTORYENTRIES.LIST>
+"""
+
+    tax_entries = ""
+
+    for tax in tax_ledgers:
+        tax_amount = tax["amount"]
+        ledger_name = tax["ledger_name"]
+
+        # TDS is a liability and must be credited.
+        is_tds = "TDS" in ledger_name.upper()
+
+        if is_tds and tax_amount > 0:
+            tax_entries += f"""
+    <LEDGERENTRIES.LIST>
+        <LEDGERNAME>{ledger_name}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>No</ISPARTYLEDGER>
+        <AMOUNT>-{tax_amount:.2f}</AMOUNT>
+    </LEDGERENTRIES.LIST>
+"""
+        elif tax_amount > 0:
+            tax_entries += f"""
+    <LEDGERENTRIES.LIST>
+        <LEDGERNAME>{ledger_name}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>No</ISPARTYLEDGER>
+        <AMOUNT>{tax_amount:.2f}</AMOUNT>
+    </LEDGERENTRIES.LIST>
+"""
+        elif tax_amount < 0:
+            tax_entries += f"""
+    <LEDGERENTRIES.LIST>
+        <LEDGERNAME>{ledger_name}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>No</ISPARTYLEDGER>
+        <AMOUNT>{tax_amount:.2f}</AMOUNT>
+    </LEDGERENTRIES.LIST>
+"""
 
     xml_data = f"""<ENVELOPE>
 <HEADER>
@@ -72,6 +229,7 @@ def create_tally_purchase_invoice(invoice_name):
 <DESC>
     <STATICVARIABLES>
         <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVERRORS>Yes</SVERRORS>
     </STATICVARIABLES>
 </DESC>
 
@@ -82,7 +240,7 @@ def create_tally_purchase_invoice(invoice_name):
 <VOUCHER
     VCHTYPE="Purchase"
     ACTION="Create"
-    OBJVIEW="Accounting Voucher View">
+    OBJVIEW="Invoice Voucher View">
 
     <DATE>{posting_date}</DATE>
 
@@ -92,7 +250,9 @@ def create_tally_purchase_invoice(invoice_name):
 
     <REFERENCE>{invoice_name}</REFERENCE>
 
-    <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+    <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+
+    <ISINVOICE>Yes</ISINVOICE>
 
     <PARTYLEDGERNAME>{supplier}</PARTYLEDGERNAME>
 
@@ -108,16 +268,9 @@ def create_tally_purchase_invoice(invoice_name):
 
     </LEDGERENTRIES.LIST>
 
+        {inventory_entries}
 
-    <LEDGERENTRIES.LIST>
-
-        <LEDGERNAME>Purchase</LEDGERNAME>
-
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-
-        <AMOUNT>{total_amount:.2f}</AMOUNT>
-
-    </LEDGERENTRIES.LIST>
+    {tax_entries}
 
 </VOUCHER>
 
@@ -192,15 +345,6 @@ def create_tally_purchase_invoice(invoice_name):
         tally_voucher_id
     )
 
-    # Because Tally numbering is MANUAL,
-    # ERPNext invoice number becomes Tally voucher number.
-
-    frappe.db.set_value(
-        "Purchase Invoice",
-        invoice_name,
-        "custom_tally_vch_number",
-        invoice_name
-    )
 
     frappe.db.commit()
 
@@ -234,7 +378,7 @@ def cancel_tally_purchase_invoice(invoice_name):
             "response": "No Tally Voucher ID found."
         }
 
-    posting_date = invoice.posting_date.strftime("%Y%m%d")
+    posting_date = invoice.posting_date.strftime("%d-%b-%Y")
 
     xml = f"""<ENVELOPE>
 <HEADER>
@@ -283,8 +427,30 @@ def cancel_tally_purchase_invoice(invoice_name):
 
     response = result.get("response", "")
 
-    if "<ALTERED>1</ALTERED>" in response:
-        return {"success": True, "response": response}
+    import re
+
+    if (
+        ("<CREATED>1</CREATED>" in response or "<ALTERED>1</ALTERED>" in response)
+        and "<ERRORS>0</ERRORS>" in response
+        and "<EXCEPTIONS>0</EXCEPTIONS>" in response
+    ):
+        match = re.search(r"<LASTVCHID>(\\d+)</LASTVCHID>", response)
+
+        if match:
+            cancel_voucher_id = match.group(1)
+
+            frappe.db.set_value(
+                "Purchase Invoice",
+                invoice_name,
+                "custom_tally_cancel_voucher_id",
+                cancel_voucher_id,
+                update_modified=False
+            )
+
+        return {
+            "success": True,
+            "response": response
+        }
 
     frappe.log_error(
         title=f"Tally Purchase Cancel Failed: {invoice_name}",
@@ -302,9 +468,7 @@ def delete_tally_purchase_invoice(invoice):
 
     tally_company = get_tally_company()
 
-    tally_voucher_number = invoice.get(
-        "custom_tally_vch_number"
-    )
+    tally_voucher_number = invoice.name
 
     if not tally_voucher_number:
 
@@ -323,9 +487,7 @@ def delete_tally_purchase_invoice(invoice):
             "response": message
         }
 
-    voucher_date = invoice.posting_date.strftime(
-        "%Y%m%d"
-    )
+    voucher_date = invoice.posting_date.strftime("%d-%b-%Y")
 
     xml_data = f"""<ENVELOPE>
 <HEADER>

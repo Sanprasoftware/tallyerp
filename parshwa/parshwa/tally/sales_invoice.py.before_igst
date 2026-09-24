@@ -3,8 +3,6 @@ import frappe
 from parshwa.parshwa.tally_client import send_to_tally
 from parshwa.parshwa.tally.customer import create_tally_customer_ledger
 
-from parshwa.parshwa.tally.item import create_tally_stock_item
-
 
 def get_tally_company():
     """
@@ -41,45 +39,22 @@ def send_sales_invoice_to_tally(invoice_name):
         }
 
     # --------------------------------------------------------
-    # Ensure all invoice Items exist in Tally
-    # --------------------------------------------------------
-
-    for invoice_item in invoice.items:
-        if not invoice_item.item_code:
-            continue
-
-        item_result = create_tally_stock_item(invoice_item.item_code)
-
-        if not item_result.get("success"):
-            return {
-                "success": False,
-                "response": (
-                    f"Unable to create/ensure Tally Item "
-                    f"for {invoice_item.item_code}.\n\n"
-                    f"{item_result.get('response', item_result.get('message', 'Unknown error'))}"
-                ),
-            }
-
-    # --------------------------------------------------------
     # Prevent duplicate Tally voucher
     # --------------------------------------------------------
 
-    tally_voucher_id = invoice.get("custom_tally_voucher_id")
-
-    if tally_voucher_id and str(tally_voucher_id) != "0":
+    if invoice.custom_tally_voucher_id and str(invoice.custom_tally_voucher_id) != "0":
         return {
             "success": False,
             "response": (
                 f"Sales Invoice {invoice_name} "
                 f"is already synced to Tally. "
-                f"Tally Voucher ID: {tally_voucher_id}"
+                f"Tally Voucher ID: {invoice.custom_tally_voucher_id}"
             ),
-            "tally_voucher_id": tally_voucher_id,
+            "tally_voucher_id": invoice.custom_tally_voucher_id,
         }
 
-    posting_date = invoice.posting_date.strftime("%d-%b-%Y")
-
-    customer = str(customer_result.get("ledger_name") or "")
+    posting_date = invoice.posting_date.strftime("%Y%m%d")
+    customer = str(invoice.customer)
     total_amount = float(invoice.grand_total or 0)
     tally_company = get_tally_company()
 
@@ -90,7 +65,6 @@ def send_sales_invoice_to_tally(invoice_name):
     sales_amount = 0.0
     cgst_amount = 0.0
     sgst_amount = 0.0
-    igst_amount = 0.0
 
     for item in invoice.items:
         sales_amount += float(item.amount or 0)
@@ -99,68 +73,11 @@ def send_sales_invoice_to_tally(invoice_name):
         account_head = str(tax.account_head or "").strip()
         tax_amount = float(tax.tax_amount or 0)
 
-        if "IGST" in account_head.upper():
-            igst_amount += tax_amount
-
-        elif "CGST" in account_head.upper():
+        if "CGST" in account_head.upper():
             cgst_amount += tax_amount
 
         elif "SGST" in account_head.upper():
             sgst_amount += tax_amount
-
-    # --------------------------------------------------------
-    # Build Tally inventory entries for Sales Invoice items
-    # --------------------------------------------------------
-
-    inventory_entries = ""
-
-    for invoice_item in invoice.items:
-        if not invoice_item.item_code:
-            continue
-
-        item = frappe.get_doc("Item", invoice_item.item_code)
-
-        stock_item_name = item.item_name
-        uom = (
-            invoice_item.uom
-            or invoice_item.stock_uom
-            or item.stock_uom
-            or "Nos"
-        )
-
-        qty = float(invoice_item.qty or 0)
-        rate = float(invoice_item.rate or 0)
-        amount = float(invoice_item.amount or 0)
-
-        inventory_entries += f"""
-    <ALLINVENTORYENTRIES.LIST>
-
-        <STOCKITEMNAME>{stock_item_name}</STOCKITEMNAME>
-
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-
-        <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-
-        <ACTUALQTY>{qty:g} {uom}</ACTUALQTY>
-
-        <BILLEDQTY>{qty:g} {uom}</BILLEDQTY>
-
-        <RATE>{rate:g}/{uom}</RATE>
-
-        <AMOUNT>{amount:.2f}</AMOUNT>
-
-        <ACCOUNTINGALLOCATIONS.LIST>
-
-            <LEDGERNAME>Sales - PEPL</LEDGERNAME>
-
-            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-
-            <AMOUNT>{amount:.2f}</AMOUNT>
-
-        </ACCOUNTINGALLOCATIONS.LIST>
-
-    </ALLINVENTORYENTRIES.LIST>
-"""
 
     xml = f"""<ENVELOPE>
 <HEADER>
@@ -184,35 +101,30 @@ def send_sales_invoice_to_tally(invoice_name):
 <VOUCHER
     VCHTYPE="Sales"
     ACTION="Create"
-    OBJVIEW="Invoice Voucher View">
+    OBJVIEW="Accounting Voucher View">
 
     <DATE>{posting_date}</DATE>
 
     <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
 
     <VOUCHERNUMBER>{invoice.name}</VOUCHERNUMBER>
-
+    
     <REFERENCE>{invoice.name}</REFERENCE>
 
-    <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
-
-    <ISINVOICE>Yes</ISINVOICE>
-
-    <PARTYLEDGERNAME>{customer}</PARTYLEDGERNAME>
+    <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
 
     <LEDGERENTRIES.LIST>
-
         <LEDGERNAME>{customer}</LEDGERNAME>
-
         <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-
         <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
-
-        <AMOUNT>-{total_amount:.3f}</AMOUNT>
-
+        <AMOUNT>-{total_amount:.2f}</AMOUNT>
     </LEDGERENTRIES.LIST>
 
-    {inventory_entries}
+        <LEDGERENTRIES.LIST>
+        <LEDGERNAME>Sales - PEPL</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <AMOUNT>{sales_amount:.2f}</AMOUNT>
+    </LEDGERENTRIES.LIST>
 
     <LEDGERENTRIES.LIST>
         <LEDGERNAME>Output CGST - PEPL</LEDGERNAME>
@@ -224,12 +136,6 @@ def send_sales_invoice_to_tally(invoice_name):
         <LEDGERNAME>Output SGST - PEPL</LEDGERNAME>
         <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
         <AMOUNT>{sgst_amount:.3f}</AMOUNT>
-    </LEDGERENTRIES.LIST>
-
-    <LEDGERENTRIES.LIST>
-        <LEDGERNAME>Output IGST - PEPL</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-        <AMOUNT>{igst_amount:.3f}</AMOUNT>
     </LEDGERENTRIES.LIST>
 
 </VOUCHER>
