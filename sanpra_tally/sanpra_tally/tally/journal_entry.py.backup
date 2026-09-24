@@ -1,0 +1,97 @@
+import frappe
+from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+
+
+def create_tally_journal_entry(journal_entry_name):
+    """
+    Send an ERPNext Journal Entry to TallyPrime.
+    """
+
+    jv = frappe.get_doc("Journal Entry", journal_entry_name)
+
+    # Get Tally company from Tally Settings
+    settings = frappe.get_all(
+        "Tally Settings",
+        filters={"enabled": 1},
+        fields=["tally_company"],
+        limit=1
+    )
+
+    if not settings:
+        frappe.throw("No enabled Tally Settings found.")
+
+    tally_company = settings[0].tally_company
+
+    # Build ledger entries
+    ledger_entries = ""
+
+    for row in jv.accounts:
+
+        if not row.account:
+            continue
+
+        # ERPNext account name may contain company suffix.
+        # Example: Cash - PEPL -> Cash
+        ledger_name = row.account
+
+        if " - " in ledger_name:
+            ledger_name = ledger_name.split(" - ")[0]
+        if row.debit and row.debit > 0:
+            ledger_entries += f"""
+        <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>{ledger_name}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <AMOUNT>-{row.debit:.2f}</AMOUNT>
+        </ALLLEDGERENTRIES.LIST>
+        
+       """
+        elif row.credit and row.credit > 0:
+            ledger_entries += f"""
+        <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>{ledger_name}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <AMOUNT>{row.credit:.2f}</AMOUNT>
+        </ALLLEDGERENTRIES.LIST>
+       """ 
+
+    voucher_number = jv.name
+
+    xml_data = f"""<ENVELOPE>
+<HEADER>
+<VERSION>1</VERSION>
+<TALLYREQUEST>Import</TALLYREQUEST>
+<TYPE>Data</TYPE>
+<ID>Vouchers</ID>
+</HEADER>
+
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+</STATICVARIABLES>
+</DESC>
+
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+<VOUCHER
+VCHTYPE="Journal"
+ACTION="Create"
+OBJVIEW="Accounting Voucher View">
+
+<DATE>{jv.posting_date.strftime("%Y%m%d")}</DATE>
+<VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+<VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
+<PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+
+{ledger_entries}
+
+</VOUCHER>
+
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>"""
+
+    print(xml_data)
+    return send_to_tally(xml_data)

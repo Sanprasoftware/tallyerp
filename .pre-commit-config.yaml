@@ -8,7 +8,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        files: "parshwa.*"
+        files: "sanpra_tally.*"
         exclude: ".*json$|.*txt$|.*csv|.*md|.*svg"
       - id: check-merge-conflict
       - id: check-ast
@@ -38,11 +38,11 @@ repos:
         # Ignore any files that might contain jinja / bundles
         exclude: |
             (?x)^(
-                parshwa/public/dist/.*|
+                sanpra_tally/public/dist/.*|
                 .*node_modules.*|
                 .*boilerplate.*|
-                parshwa/templates/includes/.*|
-                parshwa/public/js/lib/.*
+                sanpra_tally/templates/includes/.*|
+                sanpra_tally/public/js/lib/.*
             )$
 
 
@@ -55,12 +55,12 @@ repos:
         # Ignore any files that might contain jinja / bundles
         exclude: |
             (?x)^(
-                parshwa/public/dist/.*|
+                sanpra_tally/public/dist/.*|
                 cypress/.*|
                 .*node_modules.*|
                 .*boilerplate.*|
-                parshwa/templates/includes/.*|
-                parshwa/public/js/lib/.*
+                sanpra_tally/templates/includes/.*|
+                sanpra_tally/public/js/lib/.*
             )$
 
 ci:

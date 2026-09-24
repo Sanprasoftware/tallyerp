@@ -1,0 +1,167 @@
+import frappe
+
+from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+
+
+def get_tally_company():
+    """
+    Get the enabled Tally company name.
+    """
+
+    settings = frappe.get_all(
+        "Tally Settings",
+        filters={"enabled": 1},
+        fields=["tally_company"],
+        limit=1
+    )
+
+    if not settings:
+        frappe.throw("No enabled Tally Settings found.")
+
+    return settings[0].tally_company
+
+
+def create_tally_journal_entry(journal_entry_name):
+    """
+    Send an ERPNext Journal Entry to TallyPrime.
+    """
+
+    jv = frappe.get_doc("Journal Entry", journal_entry_name)
+
+    tally_company = get_tally_company()
+
+    ledger_entries = ""
+
+    for row in jv.accounts:
+
+        if not row.account:
+            continue
+
+        ledger_name = row.account
+
+        # Example: Cash - PEPL -> Cash
+        if " - " in ledger_name:
+            ledger_name = ledger_name.split(" - ")[0]
+
+        # Debit
+        if row.debit and row.debit > 0:
+            ledger_entries += f"""
+        <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>{ledger_name}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <AMOUNT>{row.debit:.2f}</AMOUNT>
+        </ALLLEDGERENTRIES.LIST>
+        """
+
+        # Credit
+        elif row.credit and row.credit > 0:
+            ledger_entries += f"""
+        <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>{ledger_name}</LEDGERNAME>
+            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+            <AMOUNT>-{row.credit:.2f}</AMOUNT>
+        </ALLLEDGERENTRIES.LIST>
+        """
+
+    voucher_number = jv.name
+    voucher_date = jv.posting_date.strftime("%Y%m%d")
+
+    xml_data = f"""<ENVELOPE>
+<HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Import</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Vouchers</ID>
+</HEADER>
+
+<BODY>
+<DESC>
+    <STATICVARIABLES>
+        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+    </STATICVARIABLES>
+</DESC>
+
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+<VOUCHER
+    VCHTYPE="Journal"
+    ACTION="Create"
+    OBJVIEW="Accounting Voucher View">
+
+    <DATE>{voucher_date}</DATE>
+    <EFFECTIVEDATE>{voucher_date}</EFFECTIVEDATE>
+
+    <PARTYLEDGERNAME>Cash</PARTYLEDGERNAME>
+    <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+    <VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
+
+    <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+
+    {ledger_entries}
+
+</VOUCHER>
+
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>"""
+
+    print(xml_data)
+
+    return send_to_tally(xml_data)
+
+
+def cancel_tally_journal_entry(journal_entry_name):
+    """
+    Mark the corresponding Journal voucher as cancelled in TallyPrime.
+    """
+
+    # This also works after the ERPNext Journal Entry is cancelled
+    jv = frappe.get_doc("Journal Entry", journal_entry_name)
+
+    tally_company = get_tally_company()
+
+    voucher_date = jv.posting_date.strftime("%Y%m%d")
+
+    xml_data = f"""<ENVELOPE>
+<HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Import</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Vouchers</ID>
+</HEADER>
+
+<BODY>
+<DESC>
+    <STATICVARIABLES>
+        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+    </STATICVARIABLES>
+</DESC>
+
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+<VOUCHER
+    VCHTYPE="Journal"
+    ACTION="Alter"
+    OBJVIEW="Accounting Voucher View">
+
+    <DATE>{voucher_date}</DATE>
+
+    <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+
+    <VOUCHERNUMBER>{journal_entry_name}</VOUCHERNUMBER>
+
+    <ISCANCELLED>Yes</ISCANCELLED>
+
+</VOUCHER>
+
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>"""
+
+    print(xml_data)
+
+    return send_to_tally(xml_data)

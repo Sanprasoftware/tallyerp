@@ -1,0 +1,35 @@
+{
+ "add_total_row": 1,
+ "add_translate_data": 0,
+ "columns": [],
+ "creation": "2026-08-13 12:07:26.507061",
+ "disable_prepared_report_automation": 0,
+ "disabled": 0,
+ "docstatus": 0,
+ "doctype": "Report",
+ "doctype_to_sync": [],
+ "filters": [],
+ "idx": 0,
+ "is_standard": "Yes",
+ "letter_head": null,
+ "modified": "2026-08-13 12:22:54.720350",
+ "modified_by": "Administrator",
+ "module": "Sanpra Tally",
+ "name": "Accounting Assignment Report",
+ "owner": "Administrator",
+ "prepared_report": 0,
+ "ref_doctype": "Sales Invoices",
+ "report_name": "Accounting Assignment Report",
+ "report_type": "Query Report",
+ "roles": [
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "Accounts User"
+  }
+ ],
+ "snapshot_report": 0,
+ "timeout": 0,
+ "query": "SELECT\n    si.posting_date AS \"Posting Date:Date:100\",\n    si.name AS \"Invoice:Link/Sales Invoice:180\",\n    si.customer AS \"Customer:Data:180\",\n    si.currency AS \"Currency:Link/Currency:90\",\n    si.conversion_rate AS \"Exchange Rate:Float:100\",\n    si.grand_total AS \"Grand Total:Currency:120\",\n    si.base_grand_total AS \"Company Amount:Currency:130\",\n    si.outstanding_amount AS \"Outstanding:Currency:120\",\n    si.status AS \"Status:Data:120\"\nFROM\n    `tabSales Invoice` si\nWHERE\n    si.docstatus = 1\n    AND si.posting_date BETWEEN %(from_date)s AND %(to_date)s\nORDER BY\n    si.posting_date DESC"
+}
