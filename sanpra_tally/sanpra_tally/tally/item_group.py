@@ -30,8 +30,8 @@ def create_tally_stock_group(item_group_name):
             "message": "Tally Company is not configured"
         }
 
-    company = escape(str(tally_company))
-    group = escape(str(group_name))
+    company = escape(str(tally_company), {'"': '&quot;'})
+    group = escape(str(group_name), {'"': '&quot;'})
 
     # For the current Tally company, Finished Goods is the
     # existing parent Stock Group.

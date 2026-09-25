@@ -1,0 +1,74 @@
+{
+ "doctype": "DocType",
+ "name": "Tally Ledger Mapping",
+ "module": "Sanpra Tally",
+ "autoname": "hash",
+ "engine": "InnoDB",
+ "track_changes": 1,
+ "field_order": [
+  "company",
+  "reference_type",
+  "reference_name",
+  "tally_ledger",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "label": "Company",
+   "fieldtype": "Link",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "reference_type",
+   "label": "ERP Record Type",
+   "fieldtype": "Select",
+   "options": "Account\nCustomer\nSupplier",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "label": "ERP Record",
+   "fieldtype": "Dynamic Link",
+   "options": "reference_type",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "tally_ledger",
+   "label": "Tally Ledger Name",
+   "fieldtype": "Data",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "enabled",
+   "label": "Enabled",
+   "fieldtype": "Check",
+   "default": "1"
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

@@ -1,571 +1,174 @@
-import re
+"""Sync Payment Entries using the amounts actually posted to the ERP ledger."""
+from collections import defaultdict
+from datetime import date
+from decimal import Decimal
+from xml.sax.saxutils import escape, quoteattr
+from xml.etree.ElementTree import ParseError
+
 import frappe
+from defusedxml.ElementTree import fromstring
+from defusedxml.common import DefusedXmlException
 
+from sanpra_tally.subscription_client import get_settings
 from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+from sanpra_tally.sanpra_tally.tally.account_ledger import create_tally_account_ledger
+from sanpra_tally.sanpra_tally.tally.customer import create_tally_customer_ledger
+from sanpra_tally.sanpra_tally.tally.supplier import create_tally_supplier_ledger
+
+VOUCHER_TYPES = {"Pay": "Payment", "Receive": "Receipt", "Internal Transfer": "Contra"}
 
 
-# ============================================================
-# GET PAYMENT ENTRY
-# ============================================================
+def get_payment_entry(name):
+    return frappe.get_doc("Payment Entry", name)
 
-def get_payment_entry(payment_entry_name):
-    return frappe.get_doc("Payment Entry", payment_entry_name)
-
-
-# ============================================================
-# TALLY LEDGER NAME
-# ============================================================
-
-def get_tally_ledger_name(account):
-    """
-    Convert ERPNext account names to corresponding
-    Tally ledger names.
-    """
-
-    if not account:
-        return ""
-
-    account = str(account).strip()
-
-    ledger_mapping = {
-        "Cash - PEPL": "Cash",
-        "HDFC Bank - PEPL": "HDFC Bank - PEPL",
-    }
-
-    return ledger_mapping.get(account, account)
-
-
-# ============================================================
-# XML ESCAPE
-# ============================================================
 
 def xml_escape(value):
+    return escape(str(value or ""), {'"': '&quot;', "'": '&apos;'})
 
-    if value is None:
-        return ""
-
-    return (
-        str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&apos;")
-    )
-
-
-# ============================================================
-# GET PAYMENT DATE
-# ============================================================
 
 def get_payment_date(doc):
-    """
-    New Tally vouchers use the ERPNext Payment Entry posting date.
-    """
-
-    return doc.posting_date.strftime("%Y%m%d")
+    return date.fromisoformat(str(doc.posting_date)[:10]).strftime("%Y%m%d")
 
 
-# ============================================================
-# CREATE PAYMENT ENTRY IN TALLY
-# ============================================================
+def failure(message, **values):
+    return {"success": False, "response": message, "xml": "", **values}
+
+
+def response_ok(result, counter=None):
+    if not result.get("success"):
+        return False
+    try:
+        root = fromstring(result.get("response", ""), forbid_dtd=True)
+        if any((n.text or "").strip() for n in root.iter("LINEERROR")):
+            return False
+        if any(int(n.text or 0) for tag in ("ERRORS", "EXCEPTIONS") for n in root.iter(tag)):
+            return False
+        if any((n.text or "").strip() == "0" for n in root.iter("STATUS")):
+            return False
+        return counter is None or int(root.findtext(".//" + counter, "0")) == 1
+    except (ParseError, DefusedXmlException, ValueError, TypeError):
+        # Malformed responses must never mark a voucher as synced.
+        return False
+
+
+def envelope(company, voucher):
+    return f'''<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST>
+<TYPE>Data</TYPE><ID>Vouchers</ID></HEADER><BODY><DESC><STATICVARIABLES>
+<SVCURRENTCOMPANY>{xml_escape(company)}</SVCURRENTCOMPANY>
+</STATICVARIABLES></DESC><DATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+{voucher}</TALLYMESSAGE></DATA></BODY></ENVELOPE>'''
+
 
 def create_tally_payment_entry(payment_entry_name):
-
     doc = get_payment_entry(payment_entry_name)
-    
-        # --------------------------------------------------------
-    # Prevent duplicate Tally voucher
-    # --------------------------------------------------------
-
-    if doc.custom_tally_voucher_id:
-        return {
-            "success": False,
-            "response": (
-                f"Payment Entry {payment_entry_name} "
-                f"is already synced to Tally. "
-                f"Tally Voucher ID: {doc.custom_tally_voucher_id}"
-            ),
-            "xml": "",
-            "tally_voucher_id": doc.custom_tally_voucher_id,
-        }
-
-    # --------------------------------------------------------
-    # Determine voucher type
-    # --------------------------------------------------------
-
-    if doc.payment_type == "Pay":
-
-        voucher_type = "Payment"
-
-        amount = doc.paid_amount or doc.received_amount
-
-        debit_account = doc.paid_to
-        credit_account = doc.paid_from
-
-    elif doc.payment_type == "Receive":
-
-        voucher_type = "Receipt"
-
-        amount = doc.received_amount or doc.paid_amount
-
-        debit_account = doc.paid_to
-        credit_account = doc.paid_from
-
-    elif doc.payment_type == "Internal Transfer":
-
-        voucher_type = "Contra"
-
-        amount = doc.paid_amount or doc.received_amount
-
-        debit_account = doc.paid_to
-        credit_account = doc.paid_from
-
-    else:
-
-        return {
-            "success": False,
-            "response": (
-                f"Unsupported Payment Type: {doc.payment_type}"
-            ),
-            "xml": "",
-            "tally_voucher_id": None,
-        }
-
-    # --------------------------------------------------------
-    # Validate amount
-    # --------------------------------------------------------
-
-    if not amount or float(amount) <= 0:
-
-        return {
-            "success": False,
-            "response": (
-                f"Invalid payment amount: {amount}"
-            ),
-            "xml": "",
-            "tally_voucher_id": None,
-        }
-
-    amount = abs(float(amount))
-
-    # --------------------------------------------------------
-    # Ledger names
-    # --------------------------------------------------------
-
-    debit_ledger = get_tally_ledger_name(
-        debit_account
-    )
-
-    credit_ledger = get_tally_ledger_name(
-        credit_account
-    )
-
-    if not debit_ledger:
-
-        return {
-            "success": False,
-            "response": "Debit ledger is missing.",
-            "xml": "",
-            "tally_voucher_id": None,
-        }
-
-    if not credit_ledger:
-
-        return {
-            "success": False,
-            "response": "Credit ledger is missing.",
-            "xml": "",
-            "tally_voucher_id": None,
-        }
-
-    # --------------------------------------------------------
-    # Date
-    # --------------------------------------------------------
-
-    date_value = get_payment_date(doc)
-
-    # --------------------------------------------------------
-    # XML values
-    # --------------------------------------------------------
-
-    voucher_type_xml = xml_escape(voucher_type)
-
-    voucher_number_xml = xml_escape(
-        doc.name
-    )
-
-    debit_ledger_xml = xml_escape(
-        debit_ledger
-    )
-
-    credit_ledger_xml = xml_escape(
-        credit_ledger
-    )
-
-    narration_xml = xml_escape(
-        doc.remarks or doc.name
-    )
-
-    # --------------------------------------------------------
-    # CREATE TALLY XML
-    # --------------------------------------------------------
-
-    xml_data = f"""<ENVELOPE>
-<HEADER>
-<VERSION>1</VERSION>
-<TALLYREQUEST>Import</TALLYREQUEST>
-<TYPE>Data</TYPE>
-<ID>Vouchers</ID>
-</HEADER>
-
-<BODY>
-
-<DESC>
-<STATICVARIABLES>
-<SVCURRENTCOMPANY>Parshwa</SVCURRENTCOMPANY>
-</STATICVARIABLES>
-</DESC>
-
-<DATA>
-
-<TALLYMESSAGE xmlns:UDF="TallyUDF">
-
-<VOUCHER
-REMOTEID="ERPNext-Payment-{xml_escape(doc.name)}"
-VCHTYPE="{voucher_type_xml}"
-ACTION="Create"
-OBJVIEW="Accounting Voucher View">
-
-<DATE>{date_value}</DATE>
-
-<EFFECTIVEDATE>{date_value}</EFFECTIVEDATE>
-
-<VOUCHERNUMBER>{voucher_number_xml}</VOUCHERNUMBER>
-
-<VOUCHERTYPENAME>{voucher_type_xml}</VOUCHERTYPENAME>
-
-<PARTYLEDGERNAME>{debit_ledger_xml}</PARTYLEDGERNAME>
-
-<ALLLEDGERENTRIES.LIST>
-
-<LEDGERNAME>{debit_ledger_xml}</LEDGERNAME>
-
-<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-
-<ISPARTYLEDGER>No</ISPARTYLEDGER>
-
-<AMOUNT>-{amount:.2f}</AMOUNT>
-
-</ALLLEDGERENTRIES.LIST>
-
-<ALLLEDGERENTRIES.LIST>
-
-<LEDGERNAME>{credit_ledger_xml}</LEDGERNAME>
-
-<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-
-<ISPARTYLEDGER>Yes</ISPARTYLEDGER>
-
-<AMOUNT>{amount:.2f}</AMOUNT>
-
-</ALLLEDGERENTRIES.LIST>
-
-<NARRATION>{narration_xml}</NARRATION>
-
-</VOUCHER>
-
-</TALLYMESSAGE>
-
-</DATA>
-
-</BODY>
-
-</ENVELOPE>"""
-
-    # --------------------------------------------------------
-    # SEND TO TALLY
-    # --------------------------------------------------------
-
-    result = send_to_tally(xml_data)
-
-    response = result.get(
-        "response",
-        ""
-    )
-
-    # --------------------------------------------------------
-    # CHECK SUCCESS
-    # --------------------------------------------------------
-
-    success = (
-        "<CREATED>1</CREATED>" in response
-        and "<EXCEPTIONS>0</EXCEPTIONS>" in response
-    )
-
-    # --------------------------------------------------------
-    # GET TALLY MASTER ID
-    # --------------------------------------------------------
-
-    tally_voucher_id = None
-
+    if doc.get("custom_tally_voucher_id"):
+        return failure(f"Payment Entry {doc.name} is already synced to Tally.",
+                       tally_voucher_id=doc.custom_tally_voucher_id)
+    if doc.docstatus != 1:
+        return failure("Only submitted Payment Entries can be synced to Tally.")
+    voucher_type = VOUCHER_TYPES.get(doc.payment_type)
+    if not voucher_type:
+        return failure(f"Unsupported Payment Type: {doc.payment_type}")
+    settings = get_settings(doc)
+    if not settings.tally_company:
+        return failure("Tally Company is not configured.")
+
+    # GL rows include deductions, taxes and exchange differences. Reconstructing
+    # a two-line voucher from paid_amount would silently omit those postings.
+    rows = frappe.get_all("GL Entry", filters={"voucher_type": "Payment Entry",
+        "voucher_no": doc.name, "company": doc.company, "is_cancelled": 0},
+        fields=["account", "party_type", "party", "debit", "credit"], order_by="name")
+    amounts = defaultdict(Decimal)
+    for row in rows:
+        if not row.account:
+            return failure("Payment Entry has a posting without an account.")
+        if row.party_type and row.party_type not in ("Customer", "Supplier"):
+            return failure(f"Payment Entry party type {row.party_type} is not supported by Tally sync.")
+        if row.party_type and not row.party:
+            return failure("Payment Entry party is missing.")
+        amounts[(row.account, row.party_type or "", row.party or "")] += (
+            Decimal(str(row.credit or 0)) - Decimal(str(row.debit or 0)))
+    amounts = {key: amount.quantize(Decimal("0.01")) for key, amount in amounts.items() if amount}
+    if not amounts or sum(amounts.values()) != 0:
+        return failure("Payment Entry has no balanced posted GL entries; Tally sync was skipped.")
+
+    ledgers = []
+    party_ledger = ""
+    for (account, party_type, party), amount in amounts.items():
+        if party_type == "Customer":
+            result = create_tally_customer_ledger(party)
+        elif party_type == "Supplier":
+            result = create_tally_supplier_ledger(party)
+        else:
+            result = create_tally_account_ledger(account)
+        if not response_ok(result):
+            return failure(result.get("message") or result.get("response") or f"Failed to sync ledger {account}.")
+        ledger = result.get("ledger_name")
+        if not ledger:
+            return failure(f"Tally ledger name is missing for {account}.")
+        if party_type:
+            party_ledger = ledger
+        ledgers.append(f'''<ALLLEDGERENTRIES.LIST><LEDGERNAME>{xml_escape(ledger)}</LEDGERNAME>
+<ISDEEMEDPOSITIVE>{'Yes' if amount < 0 else 'No'}</ISDEEMEDPOSITIVE>
+<ISPARTYLEDGER>{'Yes' if party_type else 'No'}</ISPARTYLEDGER>
+<AMOUNT>{amount:.2f}</AMOUNT></ALLLEDGERENTRIES.LIST>''')
+    posting_date = get_payment_date(doc)
+    voucher = f'''<VOUCHER REMOTEID={quoteattr('ERPNext-Payment-' + doc.name)}
+VCHTYPE={quoteattr(voucher_type)} ACTION="Create" OBJVIEW="Accounting Voucher View">
+<DATE>{posting_date}</DATE><EFFECTIVEDATE>{posting_date}</EFFECTIVEDATE>
+<VOUCHERNUMBER>{xml_escape(doc.name)}</VOUCHERNUMBER>
+<VOUCHERTYPENAME>{voucher_type}</VOUCHERTYPENAME>
+<PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+<PARTYLEDGERNAME>{xml_escape(party_ledger)}</PARTYLEDGERNAME>
+<NARRATION>{xml_escape(doc.get('remarks') or doc.name)}</NARRATION>
+{''.join(ledgers)}</VOUCHER>'''
+    xml = envelope(settings.tally_company, voucher)
+    result = send_to_tally(xml)
+    success = response_ok(result, "CREATED")
+    voucher_id = None
     if success:
-
-        match = re.search(
-            r"<LASTVCHID>(\d+)</LASTVCHID>",
-            response
-        )
-
-        if match:
-
-            tally_voucher_id = match.group(1)
-
-            # ------------------------------------------------
-            # Save Tally Master ID
-            # ------------------------------------------------
-
-            frappe.db.set_value(
-                "Payment Entry",
-                doc.name,
-                "custom_tally_voucher_id",
-                tally_voucher_id
-            )
-
-            # ------------------------------------------------
-            # Save Tally Voucher Date
-            # ------------------------------------------------
-
-            frappe.db.set_value(
-                "Payment Entry",
-                doc.name,
-                "custom_tally_voucher_date",
-                doc.posting_date
-            )
-
-            frappe.db.commit()
-
-    return {
-        "success": success,
-        "response": response,
-        "xml": xml_data,
-        "tally_voucher_id": tally_voucher_id,
-    }
+        voucher_id = fromstring(result["response"], forbid_dtd=True).findtext(".//LASTVCHID")
+        success = bool(voucher_id and voucher_id.strip().isdigit() and int(voucher_id) > 0)
+    if success:
+        frappe.db.set_value("Payment Entry", doc.name, {
+            "custom_tally_voucher_id": voucher_id.strip(),
+            "custom_tally_voucher_date": doc.posting_date,
+        })
+    response = result.get("response", "")
+    if response_ok(result, "CREATED") and not success:
+        response += "\nTally created the voucher but returned no valid voucher ID. Check Tally before retrying."
+    return {"success": success, "response": response, "xml": xml, "tally_voucher_id": voucher_id}
 
 
-# ============================================================
-# CANCEL PAYMENT ENTRY IN TALLY
-# ============================================================
+def change_payment_entry(doc, action):
+    voucher_id = str(doc.get("custom_tally_voucher_id") or "").strip()
+    if not voucher_id or voucher_id == "0":
+        # Drafts and entries that never synced have nothing to remove in Tally.
+        return {"success": True, "skipped": True, "response": "No synced Tally voucher.", "xml": ""}
+    voucher_type = VOUCHER_TYPES.get(doc.payment_type)
+    if not voucher_type:
+        return failure(f"Unsupported Payment Type: {doc.payment_type}")
+    voucher_date = doc.get("custom_tally_voucher_date")
+    if not voucher_date:
+        return failure("Tally Voucher Date is missing; reconcile the voucher before proceeding.")
+    date_value = date.fromisoformat(str(voucher_date)[:10]).strftime("%d-%b-%Y")
+    settings = get_settings(doc)
+    if not settings.tally_company:
+        return failure("Tally Company is not configured.")
+    voucher = f'''<VOUCHER DATE={quoteattr(date_value)} TAGNAME="MASTER ID"
+TAGVALUE={quoteattr(voucher_id)} VCHTYPE={quoteattr(voucher_type)} ACTION={quoteattr(action)}>
+</VOUCHER>'''
+    xml = envelope(settings.tally_company, voucher)
+    result = send_to_tally(xml)
+    return {"success": response_ok(result, {"Cancel": "CANCELLED", "Delete": "DELETED"}[action]),
+            "response": result.get("response", ""), "xml": xml, "tally_voucher_id": voucher_id}
 
-# ============================================================
-# CANCEL PAYMENT ENTRY IN TALLY
-# ============================================================
 
 def cancel_tally_payment_entry(payment_entry_name):
+    return change_payment_entry(get_payment_entry(payment_entry_name), "Cancel")
 
-    doc = get_payment_entry(payment_entry_name)
-
-    # --------------------------------------------------------
-    # Get Tally Master ID
-    # --------------------------------------------------------
-
-    tally_master_id = doc.custom_tally_voucher_id
-
-    if not tally_master_id:
-        return {
-            "success": False,
-            "response": (
-                f"No Tally Voucher ID found for Payment Entry "
-                f"{payment_entry_name}"
-            ),
-            "xml": "",
-            "tally_voucher_id": None,
-        }
-
-    # --------------------------------------------------------
-    # Determine Voucher Type
-    # --------------------------------------------------------
-
-    if doc.payment_type == "Pay":
-        voucher_type = "Payment"
-
-    elif doc.payment_type == "Receive":
-        voucher_type = "Receipt"
-
-    elif doc.payment_type == "Internal Transfer":
-        voucher_type = "Contra"
-
-    else:
-        return {
-            "success": False,
-            "response": (
-                f"Unsupported Payment Type: {doc.payment_type}"
-            ),
-            "xml": "",
-            "tally_voucher_id": tally_master_id,
-        }
-
-    # --------------------------------------------------------
-    # Get Tally Voucher Date
-    # --------------------------------------------------------
-
-    tally_voucher_date = doc.custom_tally_voucher_date
-
-    if not tally_voucher_date:
-        return {
-            "success": False,
-            "response": (
-                f"No Tally Voucher Date found for Payment Entry "
-                f"{payment_entry_name}"
-            ),
-            "xml": "",
-            "tally_voucher_id": tally_master_id,
-        }
-
-    # --------------------------------------------------------
-    # Date formats
-    # --------------------------------------------------------
-
-    date_value = tally_voucher_date.strftime("%Y%m%d")
-    date_display = tally_voucher_date.strftime("%d-%b-%Y")
-
-    # --------------------------------------------------------
-    # CANCEL TALLY XML
-    # --------------------------------------------------------
-
-    xml_data = f"""<ENVELOPE>
-<HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Import</TALLYREQUEST>
-    <TYPE>Data</TYPE>
-    <ID>Vouchers</ID>
-</HEADER>
-
-<BODY>
-
-<DESC>
-</DESC>
-
-<DATA>
-
-<TALLYMESSAGE>
-
-<VOUCHER
-    DATE="{date_display}"
-    TAGNAME="MASTER ID"
-    TAGVALUE="{xml_escape(tally_master_id)}"
-    ACTION="Cancel"
-    VCHTYPE="{xml_escape(voucher_type)}">
-
-    <NARRATION>
-        Cancelled from ERPNext Payment Entry {xml_escape(payment_entry_name)}
-    </NARRATION>
-
-</VOUCHER>
-
-</TALLYMESSAGE>
-
-</DATA>
-
-</BODY>
-</ENVELOPE>"""
-
-    # --------------------------------------------------------
-    # SEND TO TALLY
-    # --------------------------------------------------------
-
-    result = send_to_tally(xml_data)
-
-    response = result.get("response", "")
-
-    # --------------------------------------------------------
-    # CHECK RESULT
-    # --------------------------------------------------------
-
-    success = (
-        "<CANCELLED>1</CANCELLED>" in response
-        and "<EXCEPTIONS>0</EXCEPTIONS>" in response
-        and "<ERRORS>0</ERRORS>" in response
-    )
-
-    return {
-        "success": success,
-        "response": response,
-        "xml": xml_data,
-        "tally_voucher_id": tally_master_id,
-    }
-
-# ============================================================
-# DELETE PAYMENT ENTRY FROM TALLY
-# ============================================================
 
 def delete_tally_payment_entry(doc):
-    """
-    Delete the corresponding Tally voucher using ERPNext Payment Entry REMOTEID.
-    """
-
     if not doc:
-        return {
-            "success": False,
-            "response": "Payment Entry document is missing."
-        }
-
-    payment_entry_name = doc.name
-
-    remote_id = f"ERPNext-Payment-{payment_entry_name}"
-
-    xml = f"""
-<ENVELOPE>
-    <HEADER>
-        <VERSION>1</VERSION>
-        <TALLYREQUEST>Import</TALLYREQUEST>
-        <TYPE>Data</TYPE>
-        <ID>Vouchers</ID>
-    </HEADER>
-
-    <BODY>
-        <DESC>
-            <STATICVARIABLES>
-                <SVCURRENTCOMPANY>Parshwa</SVCURRENTCOMPANY>
-            </STATICVARIABLES>
-        </DESC>
-
-        <DATA>
-            <TALLYMESSAGE xmlns:UDF="TallyUDF">
-
-                <VOUCHER
-                    REMOTEID="{xml_escape(remote_id)}"
-                    ACTION="Delete">
-                </VOUCHER>
-
-            </TALLYMESSAGE>
-        </DATA>
-    </BODY>
-</ENVELOPE>
-"""
-
-    result = send_to_tally(xml)
-
-    if not result.get("success"):
-        return {
-            "success": False,
-            "response": result.get("response", ""),
-            "remote_id": remote_id
-        }
-
-    response = result.get("response", "")
-
-    deleted = re.search(r"<DELETED>(\d+)</DELETED>", response)
-    errors = re.search(r"<ERRORS>(\d+)</ERRORS>", response)
-
-    deleted_count = int(deleted.group(1)) if deleted else 0
-    error_count = int(errors.group(1)) if errors else 0
-
-    success = deleted_count == 1 and error_count == 0
-
-    return {
-        "success": success,
-        "remote_id": remote_id,
-        "deleted": deleted_count,
-        "errors": error_count,
-        "response": response
-    }
+        return failure("Payment Entry document is missing.")
+    return change_payment_entry(doc, "Delete")

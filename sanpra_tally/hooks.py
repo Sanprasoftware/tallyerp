@@ -28,26 +28,50 @@ doc_events = {
     },
 
     "Journal Entry": {
-        "on_submit": "sanpra_tally.sanpra_tally.tally.hooks.on_journal_entry_submit",
-        "on_cancel": "sanpra_tally.sanpra_tally.tally.hooks.on_journal_entry_cancel",
-        "on_trash": "sanpra_tally.sanpra_tally.tally.hooks.on_journal_entry_trash",
+        "on_submit": "sanpra_tally.sync.on_submit",
+        "on_cancel": "sanpra_tally.sync.on_cancel",
+        "on_trash": "sanpra_tally.sync.on_trash",
     },
  
     "Sales Invoice": {
-        "on_submit": "sanpra_tally.sanpra_tally.tally.hooks.on_sales_invoice_submit",
-        "on_cancel": "sanpra_tally.sanpra_tally.tally.hooks.on_sales_invoice_cancel",
-        "on_trash": "sanpra_tally.sanpra_tally.tally.hooks.on_sales_invoice_trash",
+        "on_submit": "sanpra_tally.sync.on_submit",
+        "on_cancel": "sanpra_tally.sync.on_cancel",
+        "on_trash": "sanpra_tally.sync.on_trash",
     },
     
     "Purchase Invoice": {
-    "on_submit": "sanpra_tally.sanpra_tally.tally.hooks.on_purchase_invoice_submit",
-    "on_cancel": "sanpra_tally.sanpra_tally.tally.hooks.on_purchase_invoice_cancel",
-    "on_trash": "sanpra_tally.sanpra_tally.tally.hooks.on_purchase_invoice_trash",
+    "on_submit": "sanpra_tally.sync.on_submit",
+    "on_cancel": "sanpra_tally.sync.on_cancel",
+    "on_trash": "sanpra_tally.sync.on_trash",
 },
     
    "Payment Entry": {
-        "on_submit": "sanpra_tally.sanpra_tally.tally.hooks.on_payment_entry_submit",
-        "on_cancel": "sanpra_tally.sanpra_tally.tally.hooks.on_payment_entry_cancel",
-        "on_trash": "sanpra_tally.sanpra_tally.tally.hooks.on_payment_entry_delete",
+        "on_submit": "sanpra_tally.sync.on_submit",
+        "on_cancel": "sanpra_tally.sync.on_cancel",
+        "on_trash": "sanpra_tally.sync.on_trash",
     },
 }
+after_install = "sanpra_tally.install.ensure_fields"
+after_migrate = "sanpra_tally.install.ensure_fields"
+
+# Export only the Custom Fields owned by the Tally integration.
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": [
+            ["fieldname", "in", [
+                "custom_tally_voucher_id",
+                "custom_tally_voucher_date",
+                "custom_tally_sync_status",
+                "custom_tally_sync_error",
+                "custom_tally_last_sync_attempt",
+                "custom_tally_delivery_uncertain",
+                "custom_tally_cancel_voucher_id",
+            ]],
+            ["dt", "in", ["Purchase Invoice", "Sales Invoice", "Journal Entry", "Payment Entry"]],
+        ],
+    },
+]
+
+doctype_js = {doctype: "public/js/tally_sync.js" for doctype in
+    ("Sales Invoice", "Purchase Invoice", "Journal Entry", "Payment Entry")}

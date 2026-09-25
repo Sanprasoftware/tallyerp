@@ -272,73 +272,6 @@ def on_purchase_invoice_trash(doc, method=None):
     
 
 
-# ============================================================
-# PAYMENT ENTRY
-# ============================================================
-
-def on_payment_entry_submit(doc, method=None):
-
-    from sanpra_tally.sanpra_tally.tally.payment_entry import (
-        create_tally_payment_entry
-    )
-
-    try:
-
-        result = create_tally_payment_entry(
-            doc.name
-        )
-
-        if not result.get("success"):
-
-            frappe.log_error(
-                title=f"Tally Payment Entry Failed: {doc.name}",
-                message=result.get(
-                    "response",
-                    str(result)
-                )
-            )
-
-    except Exception:
-
-        frappe.log_error(
-            title=f"Tally Payment Entry Exception: {doc.name}",
-            message=frappe.get_traceback()
-        )
-
-
-def on_payment_entry_cancel(doc, method=None):
-
-    from sanpra_tally.sanpra_tally.tally.payment_entry import (
-        cancel_tally_payment_entry
-    )
-
-    try:
-
-        result = cancel_tally_payment_entry(
-            doc.name
-        )
-
-        response = result.get(
-            "response",
-            ""
-        )
-
-        if "<CANCELLED>1</CANCELLED>" not in response:
-
-            frappe.log_error(
-                title=f"Tally Payment Entry Cancel Failed: {doc.name}",
-                message=response or str(result)
-            )
-
-    except Exception:
-
-        frappe.log_error(
-            title=f"Tally Payment Entry Cancel Exception: {doc.name}",
-            message=frappe.get_traceback()
-        )
-        
-        import frappe
-
 from sanpra_tally.sanpra_tally.tally.payment_entry import (
     create_tally_payment_entry,
     cancel_tally_payment_entry,
@@ -407,15 +340,6 @@ def on_payment_entry_cancel(doc, method=None):
 # ============================================================
 # PAYMENT ENTRY DELETE
 # ============================================================
-
-import frappe
-
-from sanpra_tally.sanpra_tally.tally.payment_entry import (
-    create_tally_payment_entry,
-    cancel_tally_payment_entry,
-    delete_tally_payment_entry,
-)
-
 
 def on_payment_entry_delete(doc, method=None):
 

@@ -1,3 +1,4 @@
+from sanpra_tally.mapping import ledger_name as mapped_ledger_name
 import frappe
 from xml.sax.saxutils import escape
 
@@ -7,7 +8,7 @@ from sanpra_tally.sanpra_tally.tally_client import get_tally_settings, send_to_t
 def create_tally_customer_ledger(customer_name):
     customer = frappe.get_doc("Customer", customer_name)
 
-    ledger_name = customer.customer_name or customer.name
+    ledger_name = mapped_ledger_name('Customer', customer.name, customer.customer_name or customer.name)
 
     settings = get_tally_settings()
     tally_company = settings.tally_company
@@ -19,7 +20,7 @@ def create_tally_customer_ledger(customer_name):
         }
 
     company = escape(str(tally_company))
-    ledger = escape(str(ledger_name))
+    ledger = escape(str(ledger_name), {'"': '&quot;'})
 
     xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>

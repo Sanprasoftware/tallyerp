@@ -1,3 +1,4 @@
+from sanpra_tally.mapping import ledger_name as mapped_ledger_name
 import frappe
 from xml.sax.saxutils import escape
 
@@ -14,8 +15,9 @@ def create_tally_tax_ledger(ledger_name):
             "message": "Tally Company is not configured"
         }
 
+    ledger_name = mapped_ledger_name('Account', ledger_name, ledger_name)
     company = escape(str(tally_company))
-    ledger = escape(str(ledger_name))
+    ledger = escape(str(ledger_name), {'"': '&quot;'})
 
     xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>

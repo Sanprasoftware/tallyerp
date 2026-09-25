@@ -33,8 +33,8 @@ def create_tally_uom(uom_name):
             "message": "Tally Company is not configured"
         }
 
-    company = escape(str(tally_company))
-    unit = escape(str(uom_name))
+    company = escape(str(tally_company), {'"': '&quot;'})
+    unit = escape(str(uom_name), {'"': '&quot;'})
 
     xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>

@@ -1,8 +1,15 @@
+from sanpra_tally.sanpra_tally.tally.account_ledger import create_tally_account_ledger
+from xml.sax.saxutils import escape
+from sanpra_tally.subscription_client import get_settings
+
+def xml_escape(value):
+    return escape(str(value or ""), {'"': "&quot;", "'": "&apos;"})
+
 import re
 import frappe
 import calendar
 
-from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+from sanpra_tally.sanpra_tally.tally_client import get_tally_settings, send_to_tally
 from sanpra_tally.sanpra_tally.tally.supplier import create_tally_supplier_ledger
 from sanpra_tally.sanpra_tally.tally.item import create_tally_stock_item
 from sanpra_tally.sanpra_tally.tally.tax_ledger import create_tally_tax_ledger
@@ -12,17 +19,7 @@ from sanpra_tally.sanpra_tally.tally.tax_ledger import create_tally_tax_ledger
 # ============================================================
 
 def get_tally_company():
-    settings = frappe.get_all(
-        "Tally Settings",
-        filters={"enabled": 1},
-        fields=["tally_company"],
-        limit=1
-    )
-
-    if not settings:
-        frappe.throw("No enabled Tally Settings found.")
-
-    return settings[0].tally_company
+    return get_tally_settings().tally_company
 
 
 # ============================================================
@@ -31,6 +28,7 @@ def get_tally_company():
 
 def create_tally_purchase_invoice(invoice_name):
     invoice = frappe.get_doc("Purchase Invoice", invoice_name)
+    get_settings(invoice)
 
     # --------------------------------------------------------
     # Prevent duplicate Tally voucher
@@ -42,7 +40,7 @@ def create_tally_purchase_invoice(invoice_name):
         return {
             "success": False,
             "response": (
-                f"Purchase Invoice {invoice_name} "
+                f"Purchase Invoice {xml_escape(invoice_name)} "
                 f"is already synced to Tally. "
                 f"Tally Voucher ID: {tally_voucher_id}"
             ),
@@ -110,18 +108,10 @@ def create_tally_purchase_invoice(invoice_name):
 
         tax_ledgers.append({
             "ledger_name": tax_result.get("ledger_name"),
-            "amount": float(tax.tax_amount or 0),
+            "amount": -float(tax.tax_amount or 0) if tax.get("add_deduct_tax") == "Deduct" else float(tax.tax_amount or 0),
         })
 
-    settings = frappe.get_doc(
-        "Tally Settings",
-        frappe.db.get_value(
-            "Tally Settings",
-            {"enabled": 1},
-            "name"
-        )
-    )
-
+    settings = get_tally_settings()
     tally_company = settings.tally_company
 
     if not tally_company:
@@ -143,6 +133,10 @@ def create_tally_purchase_invoice(invoice_name):
 
         item = frappe.get_doc("Item", invoice_item.item_code)
 
+        account_result = create_tally_account_ledger(invoice_item.expense_account)
+        if not account_result.get("success"):
+            return account_result
+        item_ledger = account_result["ledger_name"]
         stock_item_name = item.item_name
         uom = invoice_item.uom or invoice_item.stock_uom or item.stock_uom or "Nos"
         qty = float(invoice_item.qty or 0)
@@ -152,27 +146,27 @@ def create_tally_purchase_invoice(invoice_name):
         inventory_entries += f"""
     <ALLINVENTORYENTRIES.LIST>
 
-        <STOCKITEMNAME>{stock_item_name}</STOCKITEMNAME>
+        <STOCKITEMNAME>{xml_escape(stock_item_name)}</STOCKITEMNAME>
 
         <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
 
         <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
 
-        <ACTUALQTY>{qty:g} {uom}</ACTUALQTY>
+        <ACTUALQTY>{qty:g} {xml_escape(uom)}</ACTUALQTY>
 
-        <BILLEDQTY>{qty:g} {uom}</BILLEDQTY>
+        <BILLEDQTY>{qty:g} {xml_escape(uom)}</BILLEDQTY>
 
-        <RATE>{rate:g}/{uom}</RATE>
+        <RATE>{rate:g}/{xml_escape(uom)}</RATE>
 
-        <AMOUNT>{amount:.2f}</AMOUNT>
+        <AMOUNT>{-amount:.2f}</AMOUNT>
 
         <ACCOUNTINGALLOCATIONS.LIST>
 
-            <LEDGERNAME>Purchase</LEDGERNAME>
+            <LEDGERNAME>{xml_escape(item_ledger)}</LEDGERNAME>
 
             <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
 
-            <AMOUNT>{amount:.2f}</AMOUNT>
+            <AMOUNT>{-amount:.2f}</AMOUNT>
 
         </ACCOUNTINGALLOCATIONS.LIST>
 
@@ -185,36 +179,8 @@ def create_tally_purchase_invoice(invoice_name):
         tax_amount = tax["amount"]
         ledger_name = tax["ledger_name"]
 
-        # TDS is a liability and must be credited.
-        is_tds = "TDS" in ledger_name.upper()
-
-        if is_tds and tax_amount > 0:
-            tax_entries += f"""
-    <LEDGERENTRIES.LIST>
-        <LEDGERNAME>{ledger_name}</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-        <ISPARTYLEDGER>No</ISPARTYLEDGER>
-        <AMOUNT>-{tax_amount:.2f}</AMOUNT>
-    </LEDGERENTRIES.LIST>
-"""
-        elif tax_amount > 0:
-            tax_entries += f"""
-    <LEDGERENTRIES.LIST>
-        <LEDGERNAME>{ledger_name}</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-        <ISPARTYLEDGER>No</ISPARTYLEDGER>
-        <AMOUNT>{tax_amount:.2f}</AMOUNT>
-    </LEDGERENTRIES.LIST>
-"""
-        elif tax_amount < 0:
-            tax_entries += f"""
-    <LEDGERENTRIES.LIST>
-        <LEDGERNAME>{ledger_name}</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-        <ISPARTYLEDGER>No</ISPARTYLEDGER>
-        <AMOUNT>{tax_amount:.2f}</AMOUNT>
-    </LEDGERENTRIES.LIST>
-"""
+        tally_amount = -tax_amount
+        tax_entries += f"<LEDGERENTRIES.LIST><LEDGERNAME>{xml_escape(ledger_name)}</LEDGERNAME><ISDEEMEDPOSITIVE>{'Yes' if tally_amount < 0 else 'No'}</ISDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>{tally_amount:.2f}</AMOUNT></LEDGERENTRIES.LIST>"
 
     xml_data = f"""<ENVELOPE>
 <HEADER>
@@ -228,7 +194,7 @@ def create_tally_purchase_invoice(invoice_name):
 
 <DESC>
     <STATICVARIABLES>
-        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>{xml_escape(tally_company)}</SVCURRENTCOMPANY>
         <SVERRORS>Yes</SVERRORS>
     </STATICVARIABLES>
 </DESC>
@@ -246,25 +212,25 @@ def create_tally_purchase_invoice(invoice_name):
 
     <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
 
-    <VOUCHERNUMBER>{invoice_name}</VOUCHERNUMBER>
+    <VOUCHERNUMBER>{xml_escape(invoice_name)}</VOUCHERNUMBER>
 
-    <REFERENCE>{invoice_name}</REFERENCE>
+    <REFERENCE>{xml_escape(invoice_name)}</REFERENCE>
 
     <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
 
     <ISINVOICE>Yes</ISINVOICE>
 
-    <PARTYLEDGERNAME>{supplier}</PARTYLEDGERNAME>
+    <PARTYLEDGERNAME>{xml_escape(supplier)}</PARTYLEDGERNAME>
 
     <LEDGERENTRIES.LIST>
 
-        <LEDGERNAME>{supplier}</LEDGERNAME>
+        <LEDGERNAME>{xml_escape(supplier)}</LEDGERNAME>
 
-        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
 
         <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
 
-        <AMOUNT>-{total_amount:.2f}</AMOUNT>
+        <AMOUNT>{total_amount:.2f}</AMOUNT>
 
     </LEDGERENTRIES.LIST>
 
@@ -302,7 +268,7 @@ def create_tally_purchase_invoice(invoice_name):
         or "<CREATED>0</CREATED>" in response
     ):
         frappe.log_error(
-            title=f"Tally Purchase Invoice Create Failed: {invoice_name}",
+            title=f"Tally Purchase Invoice Create Failed: {xml_escape(invoice_name)}",
             message=response
         )
 
@@ -323,7 +289,7 @@ def create_tally_purchase_invoice(invoice_name):
     if not match:
 
         frappe.log_error(
-            title=f"Tally Purchase Invoice Master ID Missing: {invoice_name}",
+            title=f"Tally Purchase Invoice Master ID Missing: {xml_escape(invoice_name)}",
             message=response
         )
 
@@ -365,9 +331,10 @@ def create_tally_purchase_invoice(invoice_name):
 
 def cancel_tally_purchase_invoice(invoice_name):
     import frappe
-    from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+    from sanpra_tally.sanpra_tally.tally_client import get_tally_settings, send_to_tally
 
     invoice = frappe.get_doc("Purchase Invoice", invoice_name)
+    get_settings(invoice)
     tally_company = get_tally_company()
 
     voucher_id = invoice.custom_tally_voucher_id
@@ -391,7 +358,7 @@ def cancel_tally_purchase_invoice(invoice_name):
 <BODY>
 <DESC>
     <STATICVARIABLES>
-        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>{xml_escape(tally_company)}</SVCURRENTCOMPANY>
     </STATICVARIABLES>
 </DESC>
 
@@ -404,11 +371,11 @@ def cancel_tally_purchase_invoice(invoice_name):
 
     <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
 
-    <VOUCHERNUMBER>{invoice.name}</VOUCHERNUMBER>
+    <VOUCHERNUMBER>{xml_escape(invoice.name)}</VOUCHERNUMBER>
 
-    <REFERENCE>{invoice.name}</REFERENCE>
+    <REFERENCE>{xml_escape(invoice.name)}</REFERENCE>
 
-    <MASTERID>{voucher_id}</MASTERID>
+    <MASTERID>{xml_escape(voucher_id)}</MASTERID>
 
     <ISCANCELLED>Yes</ISCANCELLED>
 
@@ -434,7 +401,7 @@ def cancel_tally_purchase_invoice(invoice_name):
         and "<ERRORS>0</ERRORS>" in response
         and "<EXCEPTIONS>0</EXCEPTIONS>" in response
     ):
-        match = re.search(r"<LASTVCHID>(\\d+)</LASTVCHID>", response)
+        match = re.search(r"<LASTVCHID>(\d+)</LASTVCHID>", response)
 
         if match:
             cancel_voucher_id = match.group(1)
@@ -453,7 +420,7 @@ def cancel_tally_purchase_invoice(invoice_name):
         }
 
     frappe.log_error(
-        title=f"Tally Purchase Cancel Failed: {invoice_name}",
+        title=f"Tally Purchase Cancel Failed: {xml_escape(invoice_name)}",
         message=response
     )
 
@@ -474,7 +441,7 @@ def delete_tally_purchase_invoice(invoice):
 
         message = (
             f"No Tally Voucher Number found for "
-            f"Purchase Invoice {invoice_name}"
+            f"Purchase Invoice {xml_escape(invoice_name)}"
         )
 
         frappe.log_error(
@@ -501,7 +468,7 @@ def delete_tally_purchase_invoice(invoice):
 
 <DESC>
     <STATICVARIABLES>
-        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>{xml_escape(tally_company)}</SVCURRENTCOMPANY>
     </STATICVARIABLES>
 </DESC>
 
@@ -512,7 +479,7 @@ def delete_tally_purchase_invoice(invoice):
 <VOUCHER
     DATE="{voucher_date}"
     TAGNAME="VoucherNumber"
-    TAGVALUE="{tally_voucher_number}"
+    TAGVALUE="{xml_escape(tally_voucher_number)}"
     VCHTYPE="Purchase"
     ACTION="Delete">
 </VOUCHER>
@@ -544,7 +511,7 @@ def delete_tally_purchase_invoice(invoice):
         }
 
     frappe.log_error(
-        title=f"Tally Purchase Invoice Delete Failed: {invoice_name}",
+        title=f"Tally Purchase Invoice Delete Failed: {xml_escape(invoice_name)}",
         message=response
     )
 

@@ -92,10 +92,10 @@ def create_tally_stock_item(item_name):
     # Escape XML values
     # ---------------------------------------------------------
 
-    company = escape(str(tally_company))
-    stock_item = escape(str(stock_item_name))
-    stock_group = escape(str(item_group))
-    base_uom = escape(str(uom))
+    company = escape(str(tally_company), {'"': '&quot;'})
+    stock_item = escape(str(stock_item_name), {'"': '&quot;'})
+    stock_group = escape(str(item_group), {'"': '&quot;'})
+    base_uom = escape(str(uom), {'"': '&quot;'})
 
     # ---------------------------------------------------------
     # Tally Stock Item XML
@@ -197,7 +197,8 @@ def create_tally_stock_item(item_name):
     # Tally Success
     # ---------------------------------------------------------
 
-    if "<STATUS>1</STATUS>" in response:
+    if any(tag in response for tag in ("<STATUS>1</STATUS>", "<CREATED>1</CREATED>",
+                                          "<ALTERED>1</ALTERED>", "<IGNORED>1</IGNORED>")):
 
         frappe.logger("tally").info(
             f"Tally Stock Item Created Successfully: "

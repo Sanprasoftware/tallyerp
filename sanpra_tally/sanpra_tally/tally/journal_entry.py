@@ -1,7 +1,13 @@
+from xml.sax.saxutils import escape
+from sanpra_tally.subscription_client import get_settings
+
+def xml_escape(value):
+    return escape(str(value or ""), {'"': "&quot;", "'": "&apos;"})
+
 import re
 import frappe
 
-from sanpra_tally.sanpra_tally.tally_client import send_to_tally
+from sanpra_tally.sanpra_tally.tally_client import get_tally_settings, send_to_tally
 from sanpra_tally.sanpra_tally.tally.supplier import create_tally_supplier_ledger
 from sanpra_tally.sanpra_tally.tally.customer import create_tally_customer_ledger
 from sanpra_tally.sanpra_tally.tally.account_ledger import create_tally_account_ledger
@@ -19,17 +25,8 @@ def get_journal_entry(journal_entry_name):
 # ============================================================
 
 def get_tally_company():
-    settings = frappe.get_all(
-        "Tally Settings",
-        filters={"enabled": 1},
-        fields=["tally_company"],
-        limit=1
-    )
+    return get_tally_settings().tally_company
 
-    if not settings:
-        frappe.throw("No enabled Tally Settings found.")
-
-    return settings[0].tally_company
 
 # ============================================================
 # CREATE TALLY JOURNAL ENTRY
@@ -38,6 +35,7 @@ def get_tally_company():
 def create_tally_journal_entry(journal_entry_name):
 
     doc = get_journal_entry(journal_entry_name)
+    get_settings(doc)
     
         # ========================================================
     # PREVENT DUPLICATE TALLY VOUCHER
@@ -47,7 +45,7 @@ def create_tally_journal_entry(journal_entry_name):
         return {
             "success": False,
             "response": (
-                f"Journal Entry {journal_entry_name} "
+                f"Journal Entry {xml_escape(journal_entry_name)} "
                 f"is already synced to Tally. "
                 f"Tally Voucher ID: "
                 f"{doc.custom_tally_voucher_id}"
@@ -125,7 +123,7 @@ def create_tally_journal_entry(journal_entry_name):
         ledger_entries += f"""
         <ALLLEDGERENTRIES.LIST>
 
-            <LEDGERNAME>{account_name}</LEDGERNAME>
+            <LEDGERNAME>{xml_escape(account_name)}</LEDGERNAME>
 
             <ISDEEMEDPOSITIVE>{is_deemed_positive}</ISDEEMEDPOSITIVE>
 
@@ -151,7 +149,7 @@ def create_tally_journal_entry(journal_entry_name):
 
 <DESC>
     <STATICVARIABLES>
-        <SVCURRENTCOMPANY>{tally_company}</SVCURRENTCOMPANY>
+        <SVCURRENTCOMPANY>{xml_escape(tally_company)}</SVCURRENTCOMPANY>
         <SVERRORS>Yes</SVERRORS>
     </STATICVARIABLES>
 </DESC>
@@ -171,9 +169,9 @@ def create_tally_journal_entry(journal_entry_name):
     
     <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
 
-    <VOUCHERNUMBER>{journal_entry_name}</VOUCHERNUMBER>
+    <VOUCHERNUMBER>{xml_escape(journal_entry_name)}</VOUCHERNUMBER>
 
-    <NARRATION>{doc.remark or ""}</NARRATION>
+    <NARRATION>{xml_escape(doc.remark or "")}</NARRATION>
 
     {ledger_entries}
 
@@ -205,7 +203,7 @@ def create_tally_journal_entry(journal_entry_name):
         or "<STATUS>0</STATUS>" in response
     ):
         frappe.log_error(
-            title=f"Tally Journal Create Failed: {journal_entry_name}",
+            title=f"Tally Journal Create Failed: {xml_escape(journal_entry_name)}",
             message=response
         )
 
@@ -222,7 +220,7 @@ def create_tally_journal_entry(journal_entry_name):
 
     if not match:
         frappe.log_error(
-            title=f"Tally Voucher ID Missing: {journal_entry_name}",
+            title=f"Tally Voucher ID Missing: {xml_escape(journal_entry_name)}",
             message=response
         )
 
@@ -260,13 +258,14 @@ def create_tally_journal_entry(journal_entry_name):
 def cancel_tally_journal_entry(journal_entry_name):
 
     doc = get_journal_entry(journal_entry_name)
+    get_settings(doc)
 
     tally_voucher_id = doc.get("custom_tally_voucher_id")
 
     if not tally_voucher_id or str(tally_voucher_id) == "0":
         message = (
             f"No valid Tally Voucher ID found for "
-            f"Journal Entry {journal_entry_name}"
+            f"Journal Entry {xml_escape(journal_entry_name)}"
         )
 
         frappe.log_error(
@@ -302,7 +301,7 @@ def cancel_tally_journal_entry(journal_entry_name):
 <VOUCHER
     DATE="{voucher_date}"
     TAGNAME="VoucherNumber"
-    TAGVALUE="{journal_entry_name}"
+    TAGVALUE="{xml_escape(journal_entry_name)}"
     VCHTYPE="Journal"
     ACTION="Cancel">
 
@@ -328,7 +327,7 @@ def cancel_tally_journal_entry(journal_entry_name):
         or "<STATUS>0</STATUS>" in response
     ):
         frappe.log_error(
-            title=f"Tally Journal Cancel Failed: {journal_entry_name}",
+            title=f"Tally Journal Cancel Failed: {xml_escape(journal_entry_name)}",
             message=response
         )
 
@@ -360,7 +359,7 @@ def delete_tally_journal_entry(doc):
 
         message = (
             f"No valid Tally Voucher ID found for "
-            f"Journal Entry {journal_entry_name}"
+            f"Journal Entry {xml_escape(journal_entry_name)}"
         )
 
         frappe.log_error(
@@ -412,7 +411,7 @@ def delete_tally_journal_entry(doc):
 <VOUCHER
     DATE="{voucher_date}"
     TAGNAME="Voucher Number"
-    TAGVALUE="{journal_entry_name}"
+    TAGVALUE="{xml_escape(journal_entry_name)}"
     VCHTYPE="Journal"
     ACTION="Delete">
 </VOUCHER>
@@ -444,7 +443,7 @@ def delete_tally_journal_entry(doc):
     ):
 
         frappe.log_error(
-            title=f"Tally Journal Delete Failed: {journal_entry_name}",
+            title=f"Tally Journal Delete Failed: {xml_escape(journal_entry_name)}",
             message=response
         )
 
