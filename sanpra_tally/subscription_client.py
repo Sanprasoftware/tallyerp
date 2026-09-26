@@ -20,14 +20,27 @@ class GatewaySettings(dict):
         return self.get(fieldname)
 
 def get_settings(doc=None):
-    raw = frappe.conf.get("sanpra_tally_gateway") or {}
+    # Keep the legacy single-company setting as a fallback for background tasks
+    # that do not carry an ERP document. Document syncs can select a registration
+    # per ERP company using sanpra_tally_gateways.
+    raw = None
+    company = doc.get("company") if doc is not None else None
+    company_gateways = frappe.conf.get("sanpra_tally_gateways")
+    if company and company_gateways is not None:
+        if not isinstance(company_gateways, dict):
+            raise ValueError("Company-wise Tally gateway configuration must be a mapping.")
+        raw = company_gateways.get(company)
+        if not isinstance(raw, dict):
+            raise ValueError(f"No Tally registration is configured for ERP company {company}.")
+    else:
+        raw = frappe.conf.get("sanpra_tally_gateway") or {}
     if not isinstance(raw, dict):
         raise ValueError("Private subscription gateway configuration is missing.")
     values = {"gateway_url": raw.get("url"), "gateway_registration": raw.get("registration"),
         "gateway_company": raw.get("company"), "gateway_erp_url": raw.get("erp_url"),
         "gateway_api_key": raw.get("api_key"), "gateway_api_secret": raw.get("api_secret"),
         "tally_company": raw.get("tally_company") or raw.get("company"), "enabled": 1}
-    if doc is not None and doc.get("company") and values["gateway_company"] != doc.get("company"):
+    if company and values["gateway_company"] != company:
         raise ValueError("This ERP company is not registered on the private server.")
     if not values["gateway_registration"]:
         raise ValueError("This ERP site has no subscription registration.")

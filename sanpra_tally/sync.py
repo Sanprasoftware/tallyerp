@@ -121,8 +121,9 @@ def cancel_voucher(doc, settings):
     body=ET.SubElement(root,'BODY'); desc=ET.SubElement(body,'DESC')
     ET.SubElement(ET.SubElement(desc,'STATICVARIABLES'),'SVCURRENTCOMPANY').text=settings.tally_company
     msg=ET.SubElement(ET.SubElement(body,'DATA'),'TALLYMESSAGE')
-    ET.SubElement(msg,'VOUCHER',ACTION='Cancel',VCHTYPE=voucher_type(doc),TAGNAME='MASTER ID',
+    voucher=ET.SubElement(msg,'VOUCHER',ACTION='Cancel',VCHTYPE=voucher_type(doc),TAGNAME='MASTER ID',
         TAGVALUE=str(doc.custom_tally_voucher_id),DATE=date.fromisoformat(str(doc.get('custom_tally_voucher_date') or doc.posting_date)[:10]).strftime('%d-%b-%Y'))
+    ET.SubElement(voucher,'NARRATION').text='Cancelled from ERPNext'
     return send_to_tally(ET.tostring(root,encoding='unicode'))
 
 
