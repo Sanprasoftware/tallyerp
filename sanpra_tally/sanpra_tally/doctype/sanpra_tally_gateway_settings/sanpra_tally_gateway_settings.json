@@ -1,0 +1,87 @@
+{
+ "doctype": "DocType",
+ "name": "Sanpra Tally Gateway Settings",
+ "module": "Sanpra Tally",
+ "issingle": 1,
+ "engine": "InnoDB",
+ "track_changes": 1,
+ "field_order": [
+  "enabled",
+  "gateway_url",
+  "registration",
+  "erp_site_url",
+  "company",
+  "tally_company",
+  "credentials_section",
+  "api_key",
+  "api_secret"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "label": "Enabled",
+   "fieldtype": "Check",
+   "default": "1"
+  },
+  {
+   "fieldname": "gateway_url",
+   "label": "Gateway URL",
+   "fieldtype": "Data",
+   "reqd": 1,
+   "description": "Example: https://live.erpkey.in"
+  },
+  {
+   "fieldname": "registration",
+   "label": "Registration",
+   "fieldtype": "Data",
+   "reqd": 1
+  },
+  {
+   "fieldname": "erp_site_url",
+   "label": "ERP Site URL",
+   "fieldtype": "Data",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "label": "ERP Company",
+   "fieldtype": "Link",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "tally_company",
+   "label": "Tally Company",
+   "fieldtype": "Data",
+   "reqd": 1
+  },
+  {
+   "fieldname": "credentials_section",
+   "label": "Credentials",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "api_key",
+   "label": "API Key",
+   "fieldtype": "Data",
+   "reqd": 1
+  },
+  {
+   "fieldname": "api_secret",
+   "label": "API Secret",
+   "fieldtype": "Password",
+   "reqd": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}
