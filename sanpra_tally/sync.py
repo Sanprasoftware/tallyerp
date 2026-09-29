@@ -5,8 +5,9 @@ from datetime import date
 
 import frappe
 from frappe.utils import now_datetime
-from sanpra_tally.subscription_client import get_settings, lookup_vouchers
+from sanpra_tally.subscription_client import get_settings, lookup_vouchers, run_conversion_job
 from sanpra_tally.xml_utils import parse_response
+
 
 DOCTYPES = ('Sales Invoice','Purchase Invoice','Journal Entry','Payment Entry')
 active_document = ContextVar('tally_active_document', default=None)
@@ -25,6 +26,10 @@ def voucher_type(doc):
     return {'Sales Invoice':'Sales','Purchase Invoice':'Purchase','Journal Entry':'Journal'}[doc.doctype]
 
 
+def voucher_date(doc):
+    return date.fromisoformat(str(doc.get('custom_tally_voucher_date') or doc.posting_date)[:10])
+
+
 def set_status(doc, status, message=''):
     frappe.db.set_value(doc.doctype,doc.name,{
         'custom_tally_sync_status':status,'custom_tally_sync_error':str(message)[:2000],
@@ -38,7 +43,7 @@ def lookup_result(doc, result):
     # An HTTP 200 or an empty RESPONSE is not evidence that a voucher is absent.
     if root.tag != 'ENVELOPE' or root.find('.//COLLECTION') is None:
         raise ValueError('Tally did not return a voucher collection. No retry was sent.')
-    expected_date = date.fromisoformat(str(doc.get('custom_tally_voucher_date') or doc.posting_date)[:10]).strftime('%Y%m%d')
+    expected_date = voucher_date(doc).strftime('%Y%m%d')
     matches = []
     for node in root.iter('VOUCHER'):
         if (node.findtext('VOUCHERNUMBER') or '').strip() != doc.name:
@@ -88,6 +93,74 @@ def on_trash(doc, method=None):
         frappe.throw('Wait for the Tally check to finish before deleting this document.')
 
 
+def serialise_doc(doc):
+    data = doc.as_dict() if hasattr(doc, 'as_dict') else dict(doc)
+    data.pop('_user_tags', None); data.pop('_comments', None); data.pop('_assign', None); data.pop('_liked_by', None)
+    return frappe.parse_json(frappe.as_json(data))
+
+
+def add_related(seen, rows, doctype, name):
+    if not name or (doctype, name) in seen or not frappe.db.exists(doctype, name):
+        return
+    related = frappe.get_doc(doctype, name)
+    seen.add((doctype, name))
+    rows.append(serialise_doc(related))
+    if doctype == 'Item':
+        add_related(seen, rows, 'Item Group', related.get('item_group'))
+        add_related(seen, rows, 'UOM', related.get('stock_uom'))
+
+
+def collect_related(doc):
+    seen, rows = set(), []
+    if doc.get('customer'):
+        add_related(seen, rows, 'Customer', doc.customer)
+    if doc.get('supplier'):
+        add_related(seen, rows, 'Supplier', doc.supplier)
+    for item in doc.get('items') or []:
+        add_related(seen, rows, 'Item', item.get('item_code'))
+        for account in (item.get('income_account'), item.get('expense_account')):
+            add_related(seen, rows, 'Account', account)
+    for tax in doc.get('taxes') or []:
+        add_related(seen, rows, 'Account', tax.get('account_head'))
+    for row in doc.get('accounts') or []:
+        add_related(seen, rows, 'Account', row.get('account'))
+        if row.get('party_type') in ('Customer', 'Supplier'):
+            add_related(seen, rows, row.get('party_type'), row.get('party'))
+    for account in (doc.get('paid_from'), doc.get('paid_to')):
+        add_related(seen, rows, 'Account', account)
+    if doc.get('party_type') in ('Customer', 'Supplier'):
+        add_related(seen, rows, doc.party_type, doc.get('party'))
+    return rows
+
+
+def snapshot_for(doc):
+    return {'document': serialise_doc(doc), 'related': collect_related(doc)}
+
+
+def request_id_for(doc, action, snapshot):
+    import json
+    payload = json.dumps([frappe.local.site, action, snapshot], sort_keys=True, default=str, separators=(',', ':'))
+    return sha256(payload.encode()).hexdigest()
+
+
+def apply_updates(doc, updates):
+    allowed = {'custom_tally_voucher_id', 'custom_tally_voucher_date', 'custom_tally_cancel_voucher_id'}
+    clean = {key: value for key, value in (updates or {}).items() if key in allowed}
+    if clean:
+        clean['custom_tally_delivery_uncertain'] = 0
+        frappe.db.set_value(doc.doctype, doc.name, clean, update_modified=False)
+        doc.update(clean)
+
+
+def server_voucher_action(doc, action, settings):
+    snapshot = snapshot_for(doc)
+    result = run_conversion_job(settings, action, snapshot, request_id_for(doc, action, snapshot))
+    if result.get('state') == 'complete':
+        apply_updates(doc, result.get('updates'))
+        return result.get('result') or {'success': False, 'response': 'Private conversion returned no result.'}
+    return result
+
+
 @frappe.whitelist(methods=['POST'])
 def check_and_retry(doctype, name, check_only=False):
     if doctype not in DOCTYPES:
@@ -103,28 +176,12 @@ def check_and_retry(doctype, name, check_only=False):
     return {'status':'Queued'}
 
 
-def create_voucher(doc):
-    from sanpra_tally.sanpra_tally.tally.sales_invoice import send_sales_invoice_to_tally
-    from sanpra_tally.sanpra_tally.tally.purchase_invoice import create_tally_purchase_invoice
-    from sanpra_tally.sanpra_tally.tally.journal_entry import create_tally_journal_entry
-    from sanpra_tally.sanpra_tally.tally.payment_entry import create_tally_payment_entry
-    return dict(zip(DOCTYPES,(send_sales_invoice_to_tally,create_tally_purchase_invoice,
-                             create_tally_journal_entry,create_tally_payment_entry)))[doc.doctype](doc.name)
+def create_voucher(doc, settings=None):
+    return server_voucher_action(doc, 'create', settings or get_settings(doc))
 
 
 def cancel_voucher(doc, settings):
-    import xml.etree.ElementTree as ET
-    from sanpra_tally.sanpra_tally.tally_client import send_to_tally
-    root=ET.Element('ENVELOPE'); header=ET.SubElement(root,'HEADER')
-    for k,v in [('VERSION','1'),('TALLYREQUEST','Import'),('TYPE','Data'),('ID','Vouchers')]:
-        ET.SubElement(header,k).text=v
-    body=ET.SubElement(root,'BODY'); desc=ET.SubElement(body,'DESC')
-    ET.SubElement(ET.SubElement(desc,'STATICVARIABLES'),'SVCURRENTCOMPANY').text=settings.tally_company
-    msg=ET.SubElement(ET.SubElement(body,'DATA'),'TALLYMESSAGE')
-    voucher=ET.SubElement(msg,'VOUCHER',ACTION='Cancel',VCHTYPE=voucher_type(doc),TAGNAME='MASTER ID',
-        TAGVALUE=str(doc.custom_tally_voucher_id),DATE=date.fromisoformat(str(doc.get('custom_tally_voucher_date') or doc.posting_date)[:10]).strftime('%d-%b-%Y'))
-    ET.SubElement(voucher,'NARRATION').text='Cancelled from ERPNext'
-    return send_to_tally(ET.tostring(root,encoding='unicode'))
+    return server_voucher_action(doc, 'cancel', settings)
 
 
 def run_sync(doctype, name, check_only=False):
@@ -145,6 +202,7 @@ def run_sync(doctype, name, check_only=False):
                     'custom_tally_voucher_date':doc.get('custom_tally_voucher_date') or doc.posting_date,
                     'custom_tally_delivery_uncertain':0},update_modified=False)
                 doc.custom_tally_voucher_id=found['id']
+                doc.custom_tally_delivery_uncertain=0
                 if found['cancelled']:
                     set_status(doc,'Cancelled' if doc.docstatus == 2 else 'Needs Review',
                                '' if doc.docstatus == 2 else 'Tally voucher is cancelled but ERP document is submitted.')
@@ -164,7 +222,7 @@ def run_sync(doctype, name, check_only=False):
                 if check_only:
                     set_status(doc,'Pending','No matching Tally voucher found.')
                     return
-                result=create_voucher(doc)
+                result=create_voucher(doc,settings)
             if result.get('success'):
                 set_status(doc,'Synced' if doc.docstatus == 1 else 'Cancelled')
             else:

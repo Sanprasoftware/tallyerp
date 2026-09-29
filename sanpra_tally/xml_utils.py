@@ -18,8 +18,10 @@ def checked_result(result, counter=None):
         return result
     try:
         root = parse_response(result.get('response'))
-        if counter and int(root.findtext('.//' + counter, '0')) != 1:
-            raise ValueError('Tally did not confirm the requested voucher operation.')
+        if counter:
+            counters = (counter, 'ALTERED') if counter == 'CANCELLED' else (counter,)
+            if not any(int(root.findtext('.//' + name, '0')) == 1 for name in counters):
+                raise ValueError('Tally did not confirm the requested voucher operation.')
     except Exception as exc:
         return {**result, 'success': False, 'response': str(exc), 'uncertain': True}
     return result

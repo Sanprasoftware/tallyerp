@@ -82,7 +82,7 @@ class WorkerTests(unittest.TestCase):
     def test_absent_voucher_is_created_once_after_lookup(self):
         self.run_job()
         self.lookup_vouchers.assert_called_once()
-        self.create_voucher.assert_called_once_with(self.doc)
+        self.create_voucher.assert_called_once_with(self.doc,self.get_settings.return_value)
         self.assertEqual(self.set_status.call_args.args[1],'Synced')
 
     def test_found_voucher_is_reconciled_without_recreate(self):
@@ -182,6 +182,12 @@ class TransportTests(unittest.TestCase):
         self.gateway.return_value={'success':True,'response':'<RESPONSE><CREATED>1</CREATED></RESPONSE>'}
         result=tally_client.send_to_tally(self.xml)
         self.assertFalse(result['success']);self.assertTrue(result['uncertain'])
+
+    def test_cancel_accepts_tally_altered_confirmation(self):
+        self.gateway.return_value={'success':True,'response':'<RESPONSE><ALTERED>1</ALTERED><CANCELLED>0</CANCELLED><ERRORS>0</ERRORS></RESPONSE>'}
+        xml=self.xml.replace('ACTION="Create"','ACTION="Cancel"')
+        result=tally_client.send_to_tally(xml)
+        self.assertTrue(result['success'])
 
 
 class InvoiceMappingTests(unittest.TestCase):

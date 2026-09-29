@@ -30,25 +30,29 @@ doc_events = {
     "Journal Entry": {
         "on_submit": "sanpra_tally.sync.on_submit",
         "on_cancel": "sanpra_tally.sync.on_cancel",
-        "on_trash": "sanpra_tally.sync.on_trash",
+        # Delete sync intentionally disabled; flow is create/cancel only.
+        # "on_trash": "sanpra_tally.sync.on_trash",
     },
  
     "Sales Invoice": {
         "on_submit": "sanpra_tally.sync.on_submit",
         "on_cancel": "sanpra_tally.sync.on_cancel",
-        "on_trash": "sanpra_tally.sync.on_trash",
+        # Delete sync intentionally disabled; flow is create/cancel only.
+        # "on_trash": "sanpra_tally.sync.on_trash",
     },
     
     "Purchase Invoice": {
     "on_submit": "sanpra_tally.sync.on_submit",
     "on_cancel": "sanpra_tally.sync.on_cancel",
-    "on_trash": "sanpra_tally.sync.on_trash",
+    # Delete sync intentionally disabled; flow is create/cancel only.
+    # "on_trash": "sanpra_tally.sync.on_trash",
 },
     
    "Payment Entry": {
         "on_submit": "sanpra_tally.sync.on_submit",
         "on_cancel": "sanpra_tally.sync.on_cancel",
-        "on_trash": "sanpra_tally.sync.on_trash",
+        # Delete sync intentionally disabled; flow is create/cancel only.
+        # "on_trash": "sanpra_tally.sync.on_trash",
     },
 }
 after_install = "sanpra_tally.install.ensure_fields"

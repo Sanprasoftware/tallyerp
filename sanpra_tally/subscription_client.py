@@ -50,9 +50,9 @@ def get_settings(doc=None):
 def send_via_gateway(settings, xml_data):
     gateway = str(settings.get("gateway_url") or "").rstrip("/")
     parsed = urlsplit(gateway)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password
             or parsed.path or parsed.query or parsed.fragment):
-        return failure("Configure the subscription server HTTPS URL without a path.")
+        return failure("Configure the subscription server HTTP or HTTPS URL without a path.")
     api_key = settings.get("gateway_api_key")
     api_secret = settings.get_password("gateway_api_secret", raise_exception=False)
     if not all((api_key, api_secret, settings.get("gateway_registration"),
@@ -60,7 +60,9 @@ def send_via_gateway(settings, xml_data):
         return failure("Subscription credentials, registration, ERP URL and company are required.")
     request_id = uuid4().hex
     try:
-        response = requests.post(
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(
             f"{gateway}/api/method/sanpra_tally_server.api.forward",
             headers={"Authorization": f"token {api_key}:{api_secret}"},
             json={"registration": settings.gateway_registration,
@@ -76,32 +78,11 @@ def send_via_gateway(settings, xml_data):
             return failure("Invalid subscription server response.")
         if result.get("success") is not True:
             return failure(result.get("response", "Subscription request was denied."))
-        if result.get("connection_mode") != "Client Connector":
-            if not isinstance(result.get("response"), str):
-                return failure("Subscription server did not return a Tally response.")
-            return result
-        expected = hashlib.sha256(xml_data.encode("utf-8")).hexdigest()
-        if (result.get("authorized") is not True or result.get("request_id") != request_id
-                or result.get("payload_hash") != expected):
-            return failure("Invalid subscription approval.")
-        ip = IPv4Address(str(result.get("tally_ipv4", "")))
-        port = int(result.get("tally_port", 0))
-        if (ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
-                or ip.is_unspecified or not 1 <= port <= 65535):
-            return failure("Invalid registered Tally destination.")
-        with requests.Session() as session:
-            session.trust_env = False
-            tally = session.post(f"http://{ip}:{port}", data=xml_data.encode("utf-8"),
-                                 headers={"Content-Type": "text/xml; charset=utf-8"},
-                                 timeout=(5, 30), allow_redirects=False)
-        tally_success = tally.status_code == 200
-        tally_text = tally.text or ""
-        if "<EXCEPTIONS>" in tally_text and "<EXCEPTIONS>0</EXCEPTIONS>" not in tally_text:
-            tally_success = False
-        if "<LINEERROR>" in tally_text:
-            tally_success = False
-        return {"success": tally_success, "status_code": tally.status_code,
-                "response": tally_text}
+        if result.get("connection_mode") == "Client Connector":
+            return failure("Registration must use Server Forward/VPN mode; ERP server will not connect directly to Tally.")
+        if not isinstance(result.get("response"), str):
+            return failure("Subscription server did not return a Tally response.")
+        return result
     except (requests.RequestException, ValueError, TypeError):
         return failure("Gateway/Tally delivery could not be confirmed. Check Tally before retrying.")
 
@@ -110,14 +91,16 @@ def lookup_vouchers(settings, posting_date):
     """Ask Server B for its fixed read-only query, then use the registered route."""
     gateway = str(settings.get('gateway_url') or '').rstrip('/')
     parsed = urlsplit(gateway)
-    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+    if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password
             or parsed.path or parsed.query or parsed.fragment):
         return failure('Invalid subscription server URL.')
     if not all(settings.get(k) for k in ('gateway_api_key','gateway_api_secret','gateway_registration',
                                         'gateway_erp_url','gateway_company')):
         return failure('Subscription configuration is incomplete.')
     try:
-        response = requests.post(gateway + '/api/method/sanpra_tally_server.lookup.voucher_lookup',
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(gateway + '/api/method/sanpra_tally_server.lookup.voucher_lookup',
             headers={'Authorization': f'token {settings.gateway_api_key}:{settings.gateway_api_secret}'},
             json={'registration': settings.gateway_registration,'erp_site_url':settings.gateway_erp_url,
                   'company_name':settings.gateway_company,'posting_date':str(posting_date)[:10]},
@@ -127,27 +110,55 @@ def lookup_vouchers(settings, posting_date):
         result = response.json().get('message')
         if not isinstance(result,dict) or result.get('success') is not True:
             return failure('Tally check was not authorized or did not complete.')
-        if result.get('connection_mode') != 'Client Connector':
-            return result
-        xml = result.get('xml','')
-        if result.get('authorized') is not True or hashlib.sha256(xml.encode()).hexdigest() != result.get('payload_hash'):
-            return failure('Invalid Tally lookup authorization.')
-        # Only the server-generated read-only export is accepted here.
-        from defusedxml.ElementTree import fromstring
-        root = fromstring(xml,forbid_dtd=True)
-        if (root.findtext('./HEADER/TALLYREQUEST') != 'Export'
-                or root.findtext('./HEADER/ID') != 'SanpraVoucherLookup'
-                or root.findtext('.//SVCURRENTCOMPANY') != settings.tally_company):
-            return failure('Invalid Tally lookup query.')
-        ip = IPv4Address(str(result.get('tally_ipv4','')))
-        port = int(result.get('tally_port',0))
-        if (ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
-                or ip.is_unspecified or not 1 <= port <= 65535):
-            return failure('Invalid registered Tally destination.')
-        with requests.Session() as session:
-            session.trust_env = False
-            tally = session.post(f'http://{ip}:{port}',data=xml.encode(),
-                headers={'Content-Type':'text/xml; charset=utf-8'},timeout=(5,30),allow_redirects=False)
-        return {'success':tally.status_code == 200,'response':tally.text or ''}
+        if result.get('connection_mode') == 'Client Connector':
+            return failure('Registration must use Server Forward/VPN mode; ERP server will not connect directly to Tally.')
+        return result
+    except requests.RequestException as exc:
+        return failure(f'Tally check request failed: {exc}; no voucher was sent.')
     except Exception:
         return failure('Tally check could not be completed; no voucher was sent.')
+
+
+
+def gateway_headers(settings):
+    return {"Authorization": f"token {settings.gateway_api_key}:{settings.get_password('gateway_api_secret', raise_exception=False)}"}
+
+
+def post_gateway_method(settings, method, payload, timeout=(5, 120)):
+    gateway = str(settings.get("gateway_url") or "").rstrip("/")
+    parsed = urlsplit(gateway)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment):
+        return failure("Configure the subscription server HTTP or HTTPS URL without a path.")
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(
+                f"{gateway}/api/method/{method}",
+                headers=gateway_headers(settings), json=payload,
+                timeout=timeout, allow_redirects=False,
+            )
+        if response.status_code != 200:
+            return failure(f"Subscription request denied or failed (HTTP {response.status_code}).")
+        body = response.json()
+        result = body.get("message") if isinstance(body, dict) else None
+        if not isinstance(result, dict):
+            return failure("Invalid subscription server response.")
+        return result
+    except (requests.RequestException, ValueError, TypeError):
+        return failure("Subscription server request could not be completed.")
+
+
+def run_conversion_job(settings, action, snapshot, request_id):
+    base = {"registration": settings.gateway_registration, "erp_site_url": settings.gateway_erp_url,
+            "company_name": settings.gateway_company}
+    result = post_gateway_method(settings, "sanpra_tally_server.conversion_api.begin",
+        {**base, "request_id": request_id, "action": action, "snapshot": snapshot})
+    for _ in range(200):
+        if result.get("state") == "complete":
+            return result
+        if result.get("state") != "continue" or not result.get("job"):
+            return failure(result.get("response") or "Private conversion server returned an incomplete job.")
+        result = post_gateway_method(settings, "sanpra_tally_server.conversion_api.continue_job",
+            {**base, "job_id": result["job"]})
+    return failure("Private conversion job exceeded the step limit.")
